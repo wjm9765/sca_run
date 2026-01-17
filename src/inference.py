@@ -5,11 +5,10 @@ import time
 from dataclasses import dataclass
 from typing import Optional, List, Any
 
-# ★ Moshi 스타일 로거 임포트 (src/client_utils.py가 있어야 함)
+# Moshi 스타일 로거 임포트
 try:
     from .client_utils import log, get_logger
 except ImportError:
-    # 없을 경우를 대비한 폴백 (기본 print)
     def log(level, msg): print(f"[{level.upper()}] {msg}")
     def get_logger(): 
         class FallbackLogger:
@@ -33,7 +32,7 @@ class EngineConfig:
     )
 
 # =============================================================================
-# 2. 로직 클래스 (Stateless Tensor Operations) - 기존 로직 유지
+# 2. 로직 클래스 (Stateless Tensor Operations)
 # =============================================================================
 class Qwen3DuplexLogic:
     def __init__(self, model):
@@ -45,7 +44,6 @@ class Qwen3DuplexLogic:
         self.code2wav_device = model.code2wav.device
         
         self.talker_config = model.config.talker_config
-        # ★ 모델 설정에서 Codec Layer 개수 확인 (기본값 16)
         self.num_quantizers = getattr(self.talker_config, "num_quantizers", 16)
         
         try:
@@ -54,28 +52,18 @@ class Qwen3DuplexLogic:
             self.audio_dtype = model.dtype
 
     @torch.no_grad()
-    def thinker_step(
-        self,
-        input_ids: Optional[torch.Tensor],
-        input_features: Optional[torch.Tensor],
-        feature_attention_mask: Optional[torch.Tensor],
-        past_key_values: Optional[List],
-        step_idx: int
-    ):
-        # [Multi-GPU Safety]
+    def thinker_step(self, input_ids, input_features, feature_attention_mask, past_key_values, step_idx):
+        # [Device Move]
         if input_ids is not None and input_ids.device != self.thinker_device:
             input_ids = input_ids.to(self.thinker_device)
-        
         if input_features is not None:
             if input_features.device != self.thinker_device:
                 input_features = input_features.to(self.thinker_device)
-            # Dtype 맞춤
             input_features = input_features.to(dtype=self.audio_dtype)
-            
         if feature_attention_mask is not None and feature_attention_mask.device != self.thinker_device:
             feature_attention_mask = feature_attention_mask.to(self.thinker_device)
 
-        # ★ input_ids가 None이면 에러 발생 방지용 더미 토큰 생성
+        # [Dummy Token Logic]
         if input_ids is None and input_features is not None:
             input_ids = torch.tensor([[0]], device=self.thinker_device)
 
@@ -94,13 +82,7 @@ class Qwen3DuplexLogic:
         return outputs
 
     @torch.no_grad()
-    def talker_step(
-        self,
-        thinker_hidden: torch.Tensor,
-        past_key_values: Optional[List],
-        step_idx: int,
-        input_ids: Optional[torch.Tensor] = None
-    ):
+    def talker_step(self, thinker_hidden, past_key_values, step_idx, input_ids=None):
         if thinker_hidden.device != self.talker_device:
             thinker_hidden = thinker_hidden.to(self.talker_device)
         
@@ -130,7 +112,6 @@ class Qwen3DuplexLogic:
         past_hidden = talker_out.last_hidden_state[:, -1:]
         predictor_input = torch.cat((past_hidden, last_id_hidden), dim=1)
         
-        # ★ 전체 16개 중 1개(Layer0)는 이미 나왔으므로 15개를 더 생성
         needed_tokens = self.num_quantizers - 1
         
         predictor_out = self.model.talker.code_predictor.generate(
@@ -144,22 +125,18 @@ class Qwen3DuplexLogic:
 
     @torch.no_grad()
     def decode_audio(self, audio_codes: torch.Tensor) -> np.ndarray:
-        """
-        [수정] Async 환경을 위해 Numpy Array로 반환 (Bytes 변환은 CPU에서)
-        """
         if audio_codes.device != self.code2wav_device:
             audio_codes = audio_codes.to(self.code2wav_device)
         if audio_codes.dim() == 2:
             audio_codes = audio_codes.unsqueeze(-1)
             
         wav_tensor = self.model.code2wav(audio_codes)
-        
-        # ★ 핵심: GPU->CPU 비동기 전송 (Blocking 방지)
+        # Non-blocking transfer
         wav_cpu = wav_tensor.to("cpu", non_blocking=True).float().numpy()
         return wav_cpu
 
 # =============================================================================
-# 3. 엔진 클래스 (Asyncio Version)
+# 3. 엔진 클래스 (Asyncio + Executor)
 # =============================================================================
 class Qwen3OmniFullDuplexEngine:
     def __init__(self, model, tokenizer, config: EngineConfig):
@@ -168,12 +145,10 @@ class Qwen3OmniFullDuplexEngine:
         self.cfg = config
         self.logic = Qwen3DuplexLogic(model)
         
-        # Asyncio Queue는 루프 실행 후 생성해야 안전함 (initialize에서 생성)
         self.input_queue = None
         self.hidden_queue = None
         self.output_queue = None
         
-        # States
         self.thinker_kv_cache = None
         self.talker_kv_cache = None
         self.last_talker_token = None
@@ -182,6 +157,8 @@ class Qwen3OmniFullDuplexEngine:
         self.talker_step_count = 0
         
         self.is_running = False
+        self.thinker_task = None
+        self.talker_task = None
 
     async def initialize(self):
         log("info", "Initializing Async Engine...")
@@ -198,14 +175,11 @@ class Qwen3OmniFullDuplexEngine:
         codec_bos = self.model.config.talker_config.codec_bos_id
         self.last_talker_token = torch.tensor([[codec_bos]], device=self.logic.talker_device)
 
-        # Prefill Thinker (Text Only)
+        # Prefill (Blocking OK here)
         with torch.no_grad():
             out = self.logic.thinker_step(
-                input_ids=initial_ids,
-                input_features=None,
-                feature_attention_mask=None,
-                past_key_values=None,
-                step_idx=0
+                input_ids=initial_ids, input_features=None, feature_attention_mask=None,
+                past_key_values=None, step_idx=0
             )
             self.thinker_kv_cache = out.past_key_values
             self.thinker_step_count = initial_ids.shape[1]
@@ -214,126 +188,117 @@ class Qwen3OmniFullDuplexEngine:
 
     async def _thinker_loop(self):
         log("info", "Thinker Loop Started")
+        loop = asyncio.get_running_loop() # 현재 실행 중인 Async Loop 가져오기
+        
         while self.is_running:
-            # 1. 오디오 입력 대기 (Async await)
             audio_features = await self.input_queue.get()
             
-            with torch.no_grad():
-                # [Step 1] Audio Feature 입력
-                time_len = audio_features.shape[2]
-                feature_mask = torch.ones((1, time_len), device=self.logic.thinker_device, dtype=torch.long)
+            # ★ [수정] 무거운 GPU 연산을 별도 쓰레드에서 실행 (Non-blocking)
+            def run_thinker_inference():
+                with torch.no_grad():
+                    # 1. Audio Encoding Step
+                    time_len = audio_features.shape[2]
+                    feature_mask = torch.ones((1, time_len), device=self.logic.thinker_device, dtype=torch.long)
 
-                thinker_out = self.logic.thinker_step(
-                    input_ids=None, 
-                    input_features=audio_features,
-                    feature_attention_mask=feature_mask,
-                    past_key_values=self.thinker_kv_cache,
-                    step_idx=self.thinker_step_count
-                )
-                self.thinker_kv_cache = thinker_out.past_key_values
-                self.thinker_step_count += 4 # Audio Tokens
-
-                # [Step 2] Text Generation
-                next_token = thinker_out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
-                
-                # ★ 토큰 로그 출력 (Moshi 스타일)
-                token_id = next_token.item()
-                token_str = self.tokenizer.decode([token_id])
-                # 특수 토큰이 아닐 때만 출력하거나 색상 입혀서 출력
-                get_logger().print_token(token_str) 
-                
-                # Silence Check (일단 무시하고 계속 생성하도록 설정)
-                # if token_id == self.cfg.silence_token_id: pass
-
-                current_turn_hiddens = []
-                current_turn_hiddens.append(thinker_out.hidden_states[-1])
-                
-                for _ in range(self.cfg.text_output_tokens - 1):
                     thinker_out = self.logic.thinker_step(
-                        input_ids=next_token,
-                        input_features=None,
-                        feature_attention_mask=None,
+                        input_ids=None, 
+                        input_features=audio_features,
+                        feature_attention_mask=feature_mask,
                         past_key_values=self.thinker_kv_cache,
                         step_idx=self.thinker_step_count
                     )
                     self.thinker_kv_cache = thinker_out.past_key_values
-                    self.thinker_step_count += 1
-                    
+                    self.thinker_step_count += 4 
+
+                    # 2. Text Generation Step
                     next_token = thinker_out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
                     
-                    # 로그 출력
-                    t_str = self.tokenizer.decode([next_token.item()])
-                    get_logger().print_token(t_str)
-
+                    # 로그용 텍스트 디코딩 (쓰레드 안에서 수행)
+                    token_str = self.tokenizer.decode([next_token.item()])
+                    
+                    current_turn_hiddens = []
                     current_turn_hiddens.append(thinker_out.hidden_states[-1])
+                    
+                    for _ in range(self.cfg.text_output_tokens - 1):
+                        thinker_out = self.logic.thinker_step(
+                            input_ids=next_token,
+                            input_features=None,
+                            feature_attention_mask=None,
+                            past_key_values=self.thinker_kv_cache,
+                            step_idx=self.thinker_step_count
+                        )
+                        self.thinker_kv_cache = thinker_out.past_key_values
+                        self.thinker_step_count += 1
+                        
+                        next_token = thinker_out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+                        token_str += self.tokenizer.decode([next_token.item()])
+                        
+                        current_turn_hiddens.append(thinker_out.hidden_states[-1])
+                    
+                    # 결과값 묶어서 리턴
+                    return torch.cat(current_turn_hiddens, dim=1) if current_turn_hiddens else None, token_str
 
-                # Talker Queue에 비동기로 넣기
-                if len(current_turn_hiddens) > 0:
-                    stacked_hidden = torch.cat(current_turn_hiddens, dim=1)
-                    await self.hidden_queue.put(stacked_hidden)
+            # ★ Executor로 실행하고 결과를 기다림 (여기서 await하지만 Sender는 멈추지 않음)
+            stacked_hidden, log_str = await loop.run_in_executor(None, run_thinker_inference)
+            
+            # 로그 출력 (메인 루프로 돌아와서 안전하게 출력)
+            get_logger().print_token(log_str)
+
+            if stacked_hidden is not None:
+                await self.hidden_queue.put(stacked_hidden)
 
     async def _talker_loop(self):
         log("info", "Talker Loop Started")
+        loop = asyncio.get_running_loop()
+        
         while self.is_running:
-            # Hidden State 대기 (Async await)
             source_hidden = await self.hidden_queue.get()
             
-            with torch.no_grad():
-                num_hiddens = source_hidden.shape[1]
-                ratio = self.cfg.audio_output_tokens // self.cfg.text_output_tokens
-                
-                for i in range(num_hiddens):
-                    one_hidden = source_hidden[:, i:i+1, :]
-                    for _ in range(ratio):
-                        codes, new_kv = self.logic.talker_step(
-                            thinker_hidden=one_hidden,
-                            past_key_values=self.talker_kv_cache,
-                            step_idx=self.talker_step_count,
-                            input_ids=self.last_talker_token
-                        )
-                        self.talker_kv_cache = new_kv
-                        self.talker_step_count += 1
-                        self.last_talker_token = codes[:, 0:1] 
-                        
-                        # Decode (Non-blocking GPU->CPU)
-                        wav_np = self.logic.decode_audio(codes)
-                        
-                        # Bytes 변환은 CPU에서 수행
-                        wav_int16 = (wav_np * 32767).astype(np.int16).tobytes()
-                        
-                        # Output Queue에 비동기로 넣기
-                        await self.output_queue.put(wav_int16)
+            # ★ [수정] Talker 연산도 별도 쓰레드로 분리
+            def run_talker_inference():
+                with torch.no_grad():
+                    # (주의: self 변수 읽기는 괜찮으나 쓰기는 조심해야 함. 
+                    # 여기선 KV Cache 갱신이 순차적이므로 충돌 가능성 낮음)
+                    num_hiddens = source_hidden.shape[1]
+                    ratio = self.cfg.audio_output_tokens // self.cfg.text_output_tokens
+                    output_chunks = []
+                    
+                    for i in range(num_hiddens):
+                        one_hidden = source_hidden[:, i:i+1, :]
+                        for _ in range(ratio):
+                            codes, new_kv = self.logic.talker_step(
+                                thinker_hidden=one_hidden,
+                                past_key_values=self.talker_kv_cache,
+                                step_idx=self.talker_step_count,
+                                input_ids=self.last_talker_token
+                            )
+                            self.talker_kv_cache = new_kv
+                            self.talker_step_count += 1
+                            self.last_talker_token = codes[:, 0:1] 
+                            
+                            wav_np = self.logic.decode_audio(codes)
+                            wav_int16 = (wav_np * 32767).astype(np.int16).tobytes()
+                            output_chunks.append(wav_int16)
+                    return output_chunks
 
-    async def run_loops(self):
-        """백그라운드 루프 실행"""
-        self.is_running = True
-        await self.initialize()
-        
-        # Async Task 생성 및 실행
-        task1 = asyncio.create_task(self._thinker_loop())
-        task2 = asyncio.create_task(self._talker_loop())
-        
-        try:
-            # 두 루프가 끝날 때까지 대기 (보통 무한루프)
-            await asyncio.gather(task1, task2)
-        except asyncio.CancelledError:
-            log("info", "Loops Cancelled")
+            # Executor 실행 및 대기
+            wav_chunks = await loop.run_in_executor(None, run_talker_inference)
+            
+            for chunk in wav_chunks:
+                await self.output_queue.put(chunk)
 
     async def start(self):
-        """외부에서 호출하는 시작 메서드 (Task 생성)"""
         if self.is_running: return
-        # initialize는 run_loops 안에서 호출됨
-        self.runner_task = asyncio.create_task(self.run_loops())
-        log("info", "Engine Started (Async)")
+        self.is_running = True
+        await self.initialize()
+        self.thinker_task = asyncio.create_task(self._thinker_loop())
+        self.talker_task = asyncio.create_task(self._talker_loop())
+        log("info", "Engine Started (Async + Executor)")
 
     async def stop(self):
         self.is_running = False
-        if hasattr(self, 'runner_task'):
-            self.runner_task.cancel()
-            try:
-                await self.runner_task
-            except asyncio.CancelledError:
-                pass
+        if self.thinker_task: self.thinker_task.cancel()
+        if self.talker_task: self.talker_task.cancel()
         log("info", "Engine Stopped")
 
     async def push_audio(self, audio_features: torch.Tensor):
@@ -341,7 +306,6 @@ class Qwen3OmniFullDuplexEngine:
 
     async def get_audio_output(self) -> Optional[bytes]:
         try:
-            # 즉시 확인 (Non-blocking)
             return self.output_queue.get_nowait()
         except asyncio.QueueEmpty:
             return None

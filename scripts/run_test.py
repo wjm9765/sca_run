@@ -66,7 +66,7 @@ async def sender_loop(engine, chunks, processor, model, device):
         await engine.push_audio(input_features)
         
         # ★ 실시간 시뮬레이션 (다른 Task가 실행될 기회를 줌)
-        await asyncio.sleep(0.32) 
+        #await asyncio.sleep(0.32) 
         
         if i % 10 == 0:
             log("info", f"Sent chunk {i}/{len(chunks)}")
