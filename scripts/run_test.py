@@ -28,19 +28,20 @@ def load_audio_file(file_path, target_sr=16000):
     return audio, sr
 
 # -----------------------------------------------------------------------------
-# [Async Receiver] 엔진 출력을 비동기로 수거
+# [Async Receiver] 엔진 출력을 비동기로 수거 (잔반 처리 로직 포함)
 # -----------------------------------------------------------------------------
 async def receiver_loop(engine, collected_list):
     log("info", "[Receiver] Listening for output...")
-    while engine.is_running:
+    while True:
         out_bytes = await engine.get_audio_output()
         if out_bytes:
             out_np = np.frombuffer(out_bytes, dtype=np.int16).astype(np.float32) / 32767.0
             collected_list.append(out_np)
-            # 로그 유틸이 화면을 제어하므로 점 찍기 대신 가끔 로그 출력 추천
-            # log("debug", f"Received chunk ({len(out_np)})") 
         else:
-            # 큐가 비었으면 CPU 양보
+            # 데이터가 없는데 엔진도 멈췄다면? -> 할 일 다 했으니 종료
+            if not engine.is_running:
+                break
+            # 데이터는 없지만 엔진은 돌고 있다면? -> 대기
             await asyncio.sleep(0.001)
 
 # -----------------------------------------------------------------------------
@@ -48,9 +49,6 @@ async def receiver_loop(engine, collected_list):
 # -----------------------------------------------------------------------------
 async def sender_loop(engine, chunks, processor, model, device):
     log("info", "[Sender] Streaming audio chunks...")
-    
-    # 테스트용: 너무 길면 200개만
-    # chunks = chunks[:200] 
     
     for i, chunk in enumerate(chunks):
         if len(chunk) < 5120: # 16000 * 0.32
@@ -65,8 +63,9 @@ async def sender_loop(engine, chunks, processor, model, device):
         # 비동기 투입
         await engine.push_audio(input_features)
         
-        # ★ 실시간 시뮬레이션 (다른 Task가 실행될 기회를 줌)
-        #await asyncio.sleep(0.32) 
+        # ★ [수정] 실시간 시뮬레이션 복구 (0.32초 대기)
+        # 이제 5분치 데이터가 5분 동안 천천히 들어갑니다.
+        await asyncio.sleep(0.32) 
         
         if i % 10 == 0:
             log("info", f"Sent chunk {i}/{len(chunks)}")
@@ -94,11 +93,20 @@ async def main_async():
     config = EngineConfig()
     engine = Qwen3OmniFullDuplexEngine(model, processor.tokenizer, config)
     
-    # 3. 오디오 로드
+    # 3. 오디오 로드 및 5분 컷
     full_audio, sr = load_audio_file(args.input_file, target_sr=16000)
+    
+    # ★ [수정] 5분(300초)까지만 자르기
+    MAX_DURATION_SEC = 5 * 60  # 300초
+    max_samples = int(MAX_DURATION_SEC * sr)
+    
+    if len(full_audio) > max_samples:
+        log("info", f"✂️ Cutting audio to first 5 minutes ({max_samples} samples)")
+        full_audio = full_audio[:max_samples]
+    
     chunk_size = int(sr * 0.32)
     chunks = [full_audio[i:i + chunk_size] for i in range(0, len(full_audio), chunk_size)]
-    log("info", f"Chunks: {len(chunks)}")
+    log("info", f"Chunks to process: {len(chunks)} (approx {len(chunks)*0.32/60:.1f} mins)")
 
     # 4. 엔진 시작 (Task 생성)
     await engine.start()
@@ -106,7 +114,6 @@ async def main_async():
     collected_output_audio = []
     
     # 5. Receiver & Sender 동시 실행
-    # Receiver는 무한루프이므로 task로 실행, Sender는 await로 완료 대기
     recv_task = asyncio.create_task(receiver_loop(engine, collected_output_audio))
     
     start_time = time.time()
@@ -124,8 +131,11 @@ async def main_async():
         traceback.print_exc()
     finally:
         # 종료 절차
-        await engine.stop()
-        recv_task.cancel() # Receiver 종료
+        log("info", "Stopping engine...")
+        await engine.stop() # 1. 엔진 멈춤 신호 발생
+        
+        log("info", "Waiting for receiver to drain queue...")
+        await recv_task     # 2. Receiver가 남은 데이터를 다 꺼낼 때까지 대기
     
     # 6. 저장
     if collected_output_audio:
