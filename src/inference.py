@@ -24,7 +24,8 @@ class EngineConfig:
     text_output_tokens: int = 2   
     audio_output_tokens: int = 4  
     silence_token_id: int = 151646 
-    
+    audio_token_id: int = 151675
+
     system_prompt_text: str = (
         "<|im_start|>system\n"
         "You are a funny comedian performing a stand-up comedy show using Qwen3-Omni.\n"
@@ -38,11 +39,9 @@ class Qwen3DuplexLogic:
     def __init__(self, model):
         self.model = model
         self.device = model.device
-        
         self.thinker_device = model.thinker.device
         self.talker_device = model.talker.device
         self.code2wav_device = model.code2wav.device
-        
         self.talker_config = model.config.talker_config
         self.num_quantizers = getattr(self.talker_config, "num_quantizers", 16)
         
@@ -51,77 +50,272 @@ class Qwen3DuplexLogic:
         except:
             self.audio_dtype = model.dtype
 
+    def _calc_audio_token_count(self, input_lengths):
+        """
+        [공식 코드 Line 99 기반]
+        Audio Encoder의 Convolution 및 Window Chunking을 고려한 정확한 토큰 수 계산
+        """
+        # 1. 윈도우(100프레임) 단위로 처리되지 않는 나머지 부분 계산
+        input_lengths_leave = input_lengths % 100
+        
+        # 2. Convolution Layer 시뮬레이션 (Stride 2, Kernel 3, Padding 1 적용)
+        #    Layer 1
+        feat_lengths = (input_lengths_leave - 1) // 2 + 1
+        #    Layer 2 & 3 (복합 공식 적용)
+        output_lengths_leave = ((feat_lengths - 1) // 2 + 1 - 1) // 2 + 1
+        
+        # 3. 전체 토큰 수 = (윈도우 개수 * 13) + 나머지 부분 토큰 수
+        #    * Qwen3-Omni는 100프레임 윈도우 하나당 13개의 토큰을 생성합니다.
+        total_output_lengths = output_lengths_leave + (input_lengths // 100) * 13
+        
+        return int(total_output_lengths)
+
     @torch.no_grad()
     def thinker_step(self, input_ids, input_features, feature_attention_mask, past_key_values, step_idx):
-        # [Device Move]
+        # [Safety] Device Move
         if input_ids is not None and input_ids.device != self.thinker_device:
             input_ids = input_ids.to(self.thinker_device)
+        
+        # =========================================================================
+        # ★ [최종 수정] Audio Input 처리 (공식 아키텍처 준수)
+        # =========================================================================
         if input_features is not None:
             if input_features.device != self.thinker_device:
                 input_features = input_features.to(self.thinker_device)
             input_features = input_features.to(dtype=self.audio_dtype)
-        if feature_attention_mask is not None and feature_attention_mask.device != self.thinker_device:
-            feature_attention_mask = feature_attention_mask.to(self.thinker_device)
 
-        # [Dummy Token Logic]
-        if input_ids is None and input_features is not None:
+            # 1. Time 차원 확인 (Batch, Mel, Time) -> shape[2]가 Time
+            #    로그 기준: [1, 128, 32] -> Time = 32
+            raw_audio_len = input_features.shape[2] 
+            
+            # 2. 공식 수식으로 실제 필요한 토큰 개수 계산
+            target_token_count = self._calc_audio_token_count(raw_audio_len)
+            
+            # 3. input_ids 생성 (계산된 정확한 길이만큼)
+            audio_token_id = self.model.config.thinker_config.audio_token_id
+            input_ids = torch.full(
+                (1, target_token_count), 
+                audio_token_id, 
+                dtype=torch.long, 
+                device=self.thinker_device
+            )
+            
+            # 4. Attention Mask (원본 Time 길이 기준)
+            if feature_attention_mask is None:
+                feature_attention_mask = torch.ones(
+                    (1, raw_audio_len), 
+                    dtype=torch.long, 
+                    device=self.thinker_device
+                )
+            # 5. Transpose 하지 않음! (Qwen AudioEncoder 내부에서 처리함)
+        
+        elif input_ids is not None:
+            # 텍스트 입력인 경우
+            pass
+        else:
+            # 예외 처리
             input_ids = torch.tensor([[0]], device=self.thinker_device)
 
-        position_ids = torch.tensor([[step_idx]], device=self.thinker_device)
+        # =========================================================================
+        
+        # Position IDs 생성
+        seq_len = input_ids.shape[1]
+        position_ids = torch.arange(step_idx, step_idx + seq_len, device=self.thinker_device)
         position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
 
         outputs = self.model.thinker(
             input_ids=input_ids,
-            input_features=input_features,
+            input_features=input_features, 
             feature_attention_mask=feature_attention_mask,
             past_key_values=past_key_values,
             position_ids=position_ids,
             use_cache=True,
             output_hidden_states=True
         )
-        return outputs
+        # 길이를 같이 반환하여 step_count를 정확히 업데이트
+        return outputs, seq_len
 
+    # @torch.no_grad()
+    # def talker_step(self, thinker_hidden, past_key_values, step_idx, input_ids=None):
+    #     # log("debug", f"🔍 [Check] thinker_hidden: shape={thinker_hidden.shape}, device={thinker_hidden.device}, dtype={thinker_hidden.dtype}")
+        
+        
+    #     # if torch.isnan(thinker_hidden).any():
+    #     #     log("error", "💀 Critical: Thinker hidden state contains NaN!")
+    #     #     raise ValueError("Thinker hidden state is NaN")
+
+    #     # if thinker_hidden.device != self.talker_device:
+    #     #     thinker_hidden = thinker_hidden.to(self.talker_device)
+        
+    #     # if input_ids is None:
+    #     #      input_ids = torch.tensor([[self.model.config.talker_config.codec_bos_id]], device=self.talker_device)
+    #     # else:
+    #     #      input_ids = input_ids.to(self.talker_device)
+
+    #     # 1. 이전 단계(Thinker)의 연산이 진짜 끝났는지, GPU가 살아있는지 확인
+
+
+    #     log("debug", "1️⃣ Waiting for previous CUDA operations to finish (Synchronize)...")
+    #     try:
+    #         torch.cuda.synchronize() # 여기서 멈추면 -> 범인은 Thinker_step 입니다.
+    #         log("debug", "✅ GPU is alive and synced.")
+    #     except Exception as e:
+    #         log("error", f"❌ GPU died BEFORE projection: {e}")
+    #         raise e
+
+    #     # 2. 데이터 유효성 검사 (NaN/Inf)
+    #     log("debug", "2️⃣ Checking for NaN/Inf in thinker_hidden...")
+    #     if torch.isnan(thinker_hidden).any() or torch.isinf(thinker_hidden).any():
+    #         log("error", "💀 Critical: thinker_hidden contains NaN or Inf!")
+    #         # NaN이 있으면 다음 연산이 멈출 수 있음
+    #         log("debug", f"Sample values: {thinker_hidden[0,0,:10]}")
+    #         raise ValueError("NaN detected in thinker output")
+
+    #     # 3. 레이어 자체 테스트 (더미 데이터)
+    #     # 만약 thinker_hidden에 뭔가 문제가 있다면 더미는 통과하고 실데이터는 멈출 것임
+    #     log("debug", "3️⃣ Running Dummy Projection Test...")
+    #     try:
+    #         dummy_input = torch.randn_like(thinker_hidden)
+    #         conditioned_hidden = self.model.talker.text_projection(dummy_input)
+    #         log("debug", "✅ Dummy Projection passed (Layer is fine).")
+    #     except Exception as e:
+    #         log("error", f"❌ Layer weights might be corrupted: {e}")
+    #         raise e
+
+    #     # =====================================================================
+    #     # 🚀 실제 로직 실행
+    #     # =====================================================================
+        
+    #     # 1. Device Move
+    #     if thinker_hidden.device != self.talker_device:
+    #         thinker_hidden = thinker_hidden.to(self.talker_device)
+        
+    #     if input_ids is None:
+    #          input_ids = torch.tensor([[self.model.config.talker_config.codec_bos_id]], device=self.talker_device)
+    #     else:
+    #          input_ids = input_ids.to(self.talker_device)
+
+    #     2. Real Projection (여기서 멈추면 데이터 특이성 문제)
+       
+    #     conditioned_hidden = self.model.talker.text_projection(thinker_hidden)
+    #     log("debug","finishing projection ") 
+
+    #     ##finshing debugging
+    #     audio_embed = self.model.talker.model.get_input_embeddings()(input_ids)
+    #     talker_inputs_embeds = audio_embed + conditioned_hidden
+        
+    #     position_ids = torch.tensor([[step_idx]], device=self.talker_device)
+    #     position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
+
+
+    #     log("debug", f"Talker Step {step_idx}: Input Embeds Shape: {talker_inputs_embeds.shape}")
+    #     talker_out = self.model.talker.model(
+    #         inputs_embeds=talker_inputs_embeds,
+    #         past_key_values=past_key_values,
+    #         position_ids=position_ids,
+    #         use_cache=True
+    #     )
+        
+    #     logits = self.model.talker.codec_head(talker_out.last_hidden_state[:, -1, :])
+    #     layer0_code = logits.argmax(dim=-1, keepdim=True)
+        
+    #     last_id_hidden = self.model.talker.get_input_embeddings()(layer0_code)
+    #     past_hidden = talker_out.last_hidden_state[:, -1:]
+    #     predictor_input = torch.cat((past_hidden, last_id_hidden), dim=1)
+        
+    #     needed_tokens = self.num_quantizers - 1
+        
+    #     predictor_out = self.model.talker.code_predictor.generate(
+    #         inputs_embeds=predictor_input,
+    #         max_new_tokens=needed_tokens, 
+    #         do_sample=False
+    #     )
+        
+    #     full_audio_codes = torch.cat([layer0_code, predictor_out], dim=1)
+    #     return full_audio_codes, talker_out.past_key_values
     @torch.no_grad()
     def talker_step(self, thinker_hidden, past_key_values, step_idx, input_ids=None):
-        if thinker_hidden.device != self.talker_device:
-            thinker_hidden = thinker_hidden.to(self.talker_device)
-        
-        if input_ids is None:
-             input_ids = torch.tensor([[self.model.config.talker_config.codec_bos_id]], device=self.talker_device)
-        else:
-             input_ids = input_ids.to(self.talker_device)
+        try:
+            # 1. Device & Memory Safety Check
+            if thinker_hidden.device != self.talker_device:
+                thinker_hidden = thinker_hidden.to(self.talker_device)
+            if not thinker_hidden.is_contiguous():
+                thinker_hidden = thinker_hidden.contiguous()
 
-        conditioned_hidden = self.model.talker.text_projection(thinker_hidden)
-        audio_embed = self.model.talker.model.get_input_embeddings()(input_ids)
-        talker_inputs_embeds = audio_embed + conditioned_hidden
-        
-        position_ids = torch.tensor([[step_idx]], device=self.talker_device)
-        position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
+            # 2. Projection (가장 많이 멈추는 구간)
+            #    여기서 멈추지 않게 타임아웃을 걸 수는 없으니, 에러가 나면 더미로 대체하는 구조는 아니지만,
+            #    최소한 확실하게 실행되도록 구성
+            log("debug", "👉 [Talker] Executing Projection...")
+            conditioned_hidden = self.model.talker.text_projection(thinker_hidden)
+            log("debug", "✅ [Talker] Projection Done.")
 
-        talker_out = self.model.talker.model(
-            inputs_embeds=talker_inputs_embeds,
-            past_key_values=past_key_values,
-            position_ids=position_ids,
-            use_cache=True
-        )
-        
-        logits = self.model.talker.codec_head(talker_out.last_hidden_state[:, -1, :])
-        layer0_code = logits.argmax(dim=-1, keepdim=True)
-        
-        last_id_hidden = self.model.talker.get_input_embeddings()(layer0_code)
-        past_hidden = talker_out.last_hidden_state[:, -1:]
-        predictor_input = torch.cat((past_hidden, last_id_hidden), dim=1)
-        
-        needed_tokens = self.num_quantizers - 1
-        
-        predictor_out = self.model.talker.code_predictor.generate(
-            inputs_embeds=predictor_input,
-            max_new_tokens=needed_tokens, 
-            do_sample=False
-        )
-        
-        full_audio_codes = torch.cat([layer0_code, predictor_out], dim=1)
-        return full_audio_codes, talker_out.past_key_values
+            # 3. Main Forward
+            if input_ids is None:
+                 input_ids = torch.tensor([[self.model.config.talker_config.codec_bos_id]], device=self.talker_device)
+            else:
+                 input_ids = input_ids.to(self.talker_device)
+
+            audio_embed = self.model.talker.model.get_input_embeddings()(input_ids)
+            talker_inputs_embeds = audio_embed + conditioned_hidden
+            
+            position_ids = torch.tensor([[step_idx]], device=self.talker_device)
+            position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
+
+            log("debug", "👉 [Talker] Executing Main Model...")
+            talker_out = self.model.talker.model(
+                inputs_embeds=talker_inputs_embeds,
+                past_key_values=past_key_values,
+                position_ids=position_ids,
+                use_cache=True
+            )
+            log("debug", "✅ [Talker] Main Model Done.")
+
+            # 4. Code Prediction (Manual Loop)
+            #    여기가 너무 느리거나 멈추면 바로 Skip하기 위해 try-except 블록 강화
+            logits = self.model.talker.codec_head(talker_out.last_hidden_state[:, -1, :])
+            layer0_code = logits.argmax(dim=-1, keepdim=True)
+            
+            # --- [BYPASS START] 복잡한 Predictor 로직 대신 단순화 ---
+            # 만약 여기서도 멈춘다면 아래 전체 루프를 주석 처리하고 
+            # full_audio_codes = torch.randint(0, 1024, (1, 8), device=self.talker_device) 로 대체 가능
+            
+            last_id_hidden = self.model.talker.get_input_embeddings()(layer0_code)
+            past_hidden = talker_out.last_hidden_state[:, -1:]
+            predictor_input = torch.cat((past_hidden, last_id_hidden), dim=1)
+            
+            predictor_codes = [layer0_code]
+            predictor_kv = None 
+            
+            log("debug", "👉 [Talker] Executing Code Predictor Loop...")
+            for i in range(self.num_quantizers - 1):
+                # 루프가 너무 빠르면 로그 생략, 디버깅 땐 켜기
+                # log("debug", f"   - Layer {i+1}") 
+                pred_out = self.model.talker.code_predictor.model(
+                    inputs_embeds=predictor_input,
+                    past_key_values=predictor_kv,
+                    use_cache=True
+                )
+                predictor_kv = pred_out.past_key_values
+                curr_logits = self.model.talker.lm_head[i](pred_out.last_hidden_state[:, -1, :])
+                next_code = curr_logits.argmax(dim=-1, keepdim=True)
+                predictor_codes.append(next_code)
+                predictor_input = self.model.talker.code_predictor.get_input_embeddings()[i](next_code)
+            
+            log("debug", "✅ [Talker] Predictor Loop Done.")
+            # --- [BYPASS END] ---
+
+            full_audio_codes = torch.cat(predictor_codes, dim=1)
+            return full_audio_codes, talker_out.past_key_values
+
+        except Exception as e:
+            # 🚨 [EMERGENCY BYPASS] 무슨 에러가 나든 멈추지 않게 가짜 데이터 리턴
+            log("error", f"🚨 Talker Crashed! Returning Dummy Data. Error: {e}")
+            
+            # 더미 오디오 코드 (랜덤)
+            dummy_codes = torch.randint(0, 1024, (1, self.num_quantizers), device=self.talker_device)
+            # 더미 KV Cache (그냥 None 주면 다음 스텝에서 에러날 수 있으니, 이전꺼 리턴하거나 None)
+            # 여기서는 안전하게 None 리턴 (모델이 알아서 처리하게 둠, 성능은 망가지지만 루프는 돈다)
+            return dummy_codes, past_key_values
 
     @torch.no_grad()
     def decode_audio(self, audio_codes: torch.Tensor) -> np.ndarray:
@@ -166,21 +360,29 @@ class Qwen3OmniFullDuplexEngine:
         self.hidden_queue = asyncio.Queue()
         self.output_queue = asyncio.Queue()
 
+        # System Prompt Tokenize
         initial_ids = self.tokenizer(
             self.cfg.system_prompt_text, 
             return_tensors="pt", 
             add_special_tokens=False
         ).input_ids.to(self.logic.thinker_device)
         
+        # Talker 초기 토큰 설정
         codec_bos = self.model.config.talker_config.codec_bos_id
         self.last_talker_token = torch.tensor([[codec_bos]], device=self.logic.talker_device)
 
         # Prefill (Blocking OK here)
         with torch.no_grad():
-            out = self.logic.thinker_step(
-                input_ids=initial_ids, input_features=None, feature_attention_mask=None,
-                past_key_values=None, step_idx=0
+            # ★ [수정 포인트] 리턴값이 (outputs, seq_len) 튜플이므로 언패킹 해야 함
+            out, _ = self.logic.thinker_step(
+                input_ids=initial_ids, 
+                input_features=None, 
+                feature_attention_mask=None,
+                past_key_values=None, 
+                step_idx=0
             )
+            
+            # 이제 out은 정상적인 ModelOutput 객체입니다.
             self.thinker_kv_cache = out.past_key_values
             self.thinker_step_count = initial_ids.shape[1]
             
@@ -191,78 +393,74 @@ class Qwen3OmniFullDuplexEngine:
         loop = asyncio.get_running_loop()
         
         while self.is_running:
-            # 1. 오디오 입력 대기
             audio_features = await self.input_queue.get()
             
-            # 2. GPU 연산 (Blocking 방지를 위해 Executor 사용)
             def run_thinker_inference():
                 with torch.no_grad():
                     # =========================================================
-                    # [Step 1] Audio Processing (듣기)
+                    # [Step 1] 듣기 (Listening)
                     # =========================================================
-                    time_len = audio_features.shape[2]
-                    feature_mask = torch.ones((1, time_len), device=self.logic.thinker_device, dtype=torch.long)
-
-                    thinker_out = self.logic.thinker_step(
+                    thinker_out, consumed_len = self.logic.thinker_step(
                         input_ids=None, 
                         input_features=audio_features,
-                        feature_attention_mask=feature_mask,
+                        feature_attention_mask=None,
                         past_key_values=self.thinker_kv_cache,
                         step_idx=self.thinker_step_count
                     )
                     
-                    # ★ [중요] 듣기 과정의 KV Cache 업데이트 (무조건 수행)
                     self.thinker_kv_cache = thinker_out.past_key_values
-                    self.thinker_step_count += 4 
+                    self.thinker_step_count += consumed_len 
 
                     # =========================================================
-                    # [Step 2] First Token Generation (판단)
+                    # [Step 2] 판단 (Decision)
                     # =========================================================
                     next_token = thinker_out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
                     token_id = next_token.item()
-                    
-                    # 로그용 문자열 미리 디코딩
-                    if token_id == self.cfg.silence_token_id:
-                        token_str = "<|silence|>"
-                    elif token_id == 151645:
-                        token_str = "<|im_end|>"
-                    else:
-                        token_str = self.tokenizer.decode([token_id], skip_special_tokens=False)
 
-                    # # ★ [핵심 로직] Silence Check
-                    if token_id == self.cfg.silence_token_id :
-                        # 1. KV Cache는 위에서 이미 업데이트 되었으므로 기억은 유지됨.
-                        # 2. Talker로 보낼 Hidden State는 없음.
-                        # 3. 여기서 함수 종료 (Talker Queue에 넣지 않음)
-                        return None, token_str
+                    log("debug", f"Thinker predicted token ID: {token_id}")
+                    # if token_id == self.cfg.silence_token_id or token_id == 151645:
+                    #      return None, "<|silence|>"
 
-                    
                     # =========================================================
-                    # [Step 3] Text Generation (말하기 결심했을 때만)
+                    # [Step 3] 말하기 (Speaking) - ★ 수정된 부분
                     # =========================================================
                     current_turn_hiddens = []
-                    current_turn_hiddens.append(thinker_out.hidden_states[-1])
                     
-                    # 설정된 토큰 수만큼 추가 생성
-                    for _ in range(self.cfg.text_output_tokens - 1):
-                        thinker_out = self.logic.thinker_step(
+                    # [삭제됨] current_turn_hiddens.append(thinker_out.hidden_states[-1]) 
+                    # 이유: 위 코드는 '오디오'에 대한 히든 스테이트이므로 Talker에게 적합하지 않음.
+                    
+                    # [수정] 설정된 토큰 수(예: 2)만큼 루프를 돌며 "순수 텍스트 히든 스테이트" 생성
+                    token_str = ""
+                    
+                    # range(N - 1) -> range(N)으로 변경
+                    for _ in range(self.cfg.text_output_tokens):
+                        # 1. 예측된 텍스트 토큰(next_token)을 입력으로 다시 Thinker 실행
+                        thinker_out, _ = self.logic.thinker_step(
                             input_ids=next_token,
                             input_features=None,
                             feature_attention_mask=None,
                             past_key_values=self.thinker_kv_cache,
                             step_idx=self.thinker_step_count
                         )
-                        # 생성하면서 Cache 계속 업데이트
+                        
+                        # 2. 상태 업데이트
                         self.thinker_kv_cache = thinker_out.past_key_values
                         self.thinker_step_count += 1
                         
+                        # 3. ★ 중요: 텍스트 입력에 대한 결과(Hidden State)만 저장
+                        #    이것이 공식 코드의 assistant_hidden 부분과 일치함
+                        safe_hidden = thinker_out.hidden_states[-1].detach().clone()
+                        log("debug", f"Appending thinker hidden state for text token: shape={safe_hidden.shape}")
+
+                        current_turn_hiddens.append(safe_hidden)
+                        
+                        # 4. 다음 토큰 예측 및 로그 준비
                         next_token = thinker_out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
                         token_str += self.tokenizer.decode([next_token.item()])
-                        
-                        current_turn_hiddens.append(thinker_out.hidden_states[-1])
                     
-                    # Talker에게 보낼 Hidden State 묶음 반환
-                    return torch.cat(current_turn_hiddens, dim=1), token_str
+                    final_hidden_to_send = torch.cat(current_turn_hiddens, dim=1).contiguous()
+                    # 결과: [1, 2, Hidden_Dim] (오디오 섞이지 않은 순수 텍스트 상태)
+                    return final_hidden_to_send, token_str
 
             # Executor 실행 (Sender를 방해하지 않음)
             stacked_hidden, log_str = await loop.run_in_executor(None, run_thinker_inference)
@@ -288,17 +486,21 @@ class Qwen3OmniFullDuplexEngine:
             
             # ★ [요청하신 수정] Talker가 실제로 일을 시작할 때 로그 출력
             # (Queue에서 꺼냈다는 건 침묵이 아니라는 뜻)
-            log("info", "👄 Talker generating audio...")
             
             def run_talker_inference():
                 with torch.no_grad():
                     num_hiddens = source_hidden.shape[1]
                     ratio = self.cfg.audio_output_tokens // self.cfg.text_output_tokens
                     output_chunks = []
-                    
+
+                    log("info", f"👄 Talker generating audio...{num_hiddens} hidden states, ratio {ratio}")
+            
+
                     for i in range(num_hiddens):
                         one_hidden = source_hidden[:, i:i+1, :]
                         for _ in range(ratio):
+                            log("debug", f"Talker generating token at step {self.talker_step_count}")
+
                             codes, new_kv = self.logic.talker_step(
                                 thinker_hidden=one_hidden,
                                 past_key_values=self.talker_kv_cache,
