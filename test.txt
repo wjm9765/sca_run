@@ -3,7 +3,7 @@ torch>=2.4.0
 numpy
 
 # --- Hugging Face & Model ---
-transformers>=4.46.0
+transformers==4.57.0
 accelerate>=1.0.0       # device_map="auto" 사용 시 필수
 
 # --- Audio Processing ---
@@ -13,6 +13,6 @@ scipy                   # librosa 의존성
 
 # --- Optimization (코드에 flash_attention_2가 명시되어 있음) ---
 flash-attn>=2.6.3
-
+bitsandbytes
 #apt update && apt-get install -y libsndfile1 ffmpeg build-essential ninja-build gh
 
