@@ -121,7 +121,7 @@ async def main_async():
         await sender_loop(engine, chunks, processor, model, args.device)
         
         log("info", "All chunks sent. Waiting for trailing response...")
-        await asyncio.sleep(3.0) # 잔여 응답 대기
+        await asyncio.sleep(120.0) # 잔여 응답 대기
 
     except asyncio.CancelledError:
         pass
