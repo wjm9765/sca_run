@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import os
 
@@ -81,8 +81,8 @@ class QwenConfig:
 
 @dataclass
 class AppConfig:
-    audio: AudioConfig = AudioConfig()
-    qwen: QwenConfig = QwenConfig()
+    audio: AudioConfig = field(default_factory=AudioConfig)
+    qwen: QwenConfig = field(default_factory=QwenConfig)
 
 
 def load_config(path: str | Path | None = None) -> AppConfig:
