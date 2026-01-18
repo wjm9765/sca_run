@@ -7,6 +7,7 @@ import torch
 import numpy as np
 import librosa
 import soundfile as sf
+from transformers import BitsAndBytesConfig
 
 # 프로젝트 루트 경로 추가
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -19,7 +20,7 @@ from transformers import Qwen3OmniMoeForConditionalGeneration, Qwen3OmniMoeProce
 
 # 메모리 단편화 방지
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-
+os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 def load_audio_file(file_path, target_sr=16000):
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"Audio file not found: {file_path}")
@@ -60,6 +61,10 @@ async def sender_loop(engine, chunks, processor, model, device):
         )
         input_features = features.input_features.to(device).to(model.dtype)
         
+        if torch.isnan(input_features).any() or torch.isinf(input_features).any():
+            log("warning", f"⚠️ Chunk {i}: NaN/Inf detected! Replacing with zeros.")
+            input_features = torch.nan_to_num(input_features, nan=0.0, posinf=0.0, neginf=0.0)
+
         # 비동기 투입
         await engine.push_audio(input_features)
         
@@ -78,12 +83,39 @@ async def main_async():
     parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()
 
-    # 1. 모델 로드
+
+    device_map = {
+        # --- [GPU 0] Thinker Input & Front Layers ---
+        "thinker.audio_tower": 0,
+        "thinker.visual": 0,
+        "thinker.model.embed_tokens": 0,
+        "thinker.model.rotary_emb": 0, # 위치 정보는 0번에서 시작
+        
+        # --- [GPU 1] Thinker Output & Talker System ---
+        "thinker.model.norm": 1,
+        "thinker.lm_head": 1,
+        "talker": 1,    # Talker 전체 (Model, Projection, Predictor 등)
+        "code2wav": 1,  # Audio Decoder
+    }
+
+    # Thinker Layer 분산 (총 48개 레이어)
+    # 0~27번 (28개) -> GPU 0 (약 35GB 소모 예상)
+    # 28~47번 (20개) -> GPU 1 (Talker 포함 약 30GB 소모 예상)
+    # -> 남는 VRAM은 KV Cache가 사용함
+    num_thinker_layers = 48
+    split_index = 28
+    for i in range(num_thinker_layers):
+        if i < split_index:
+            device_map[f"thinker.model.layers.{i}"] = 0
+        else:
+            device_map[f"thinker.model.layers.{i}"] = 1
+
+
     log("info", f"Loading Model from {args.model_path}...")
     model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
         args.model_path,
-        device_map="auto",
-        dtype='auto',
+        device_map=device_map, 
+        torch_dtype=torch.bfloat16, # BF16 원본 로드 (양자화 X)
         attn_implementation='flash_attention_2',
         trust_remote_code=True
     )
@@ -97,7 +129,7 @@ async def main_async():
     full_audio, sr = load_audio_file(args.input_file, target_sr=16000)
     
     # ★ [수정] 5분(300초)까지만 자르기
-    MAX_DURATION_SEC = 5 * 60  # 300초
+    MAX_DURATION_SEC = 0.32 # 300초
     max_samples = int(MAX_DURATION_SEC * sr)
     
     if len(full_audio) > max_samples:
