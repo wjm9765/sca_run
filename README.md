@@ -47,6 +47,37 @@ export SCA_QWEN_DEVICE_MAP="auto"      # or "cuda:0"
 export SCA_QWEN_TORCH_DTYPE="auto"     # or "float16"
 
 python -m sca_run.server --config config/default.toml --host 0.0.0.0 --port 8000
+import torch
+from dataclasses import dataclass
+from typing import Optional
+
+```bash
+@dataclass
+class AudioInput:
+ 
+    # 전처리된 Mel-Spectrogram Feature [1, 128, T]
+    features: torch.Tensor 
+    
+    # (선택) 디버깅용 타임스탬프 (Lag 측정용)
+    timestamp: float = 0.0
+
+@dataclass
+class ThoughtPacket:
+ 
+    # Talker의 입력이 될 Hidden States [1, Seq, Dim]
+    hidden_states: torch.Tensor
+    
+    # 예: "음...", "반갑", "습니다"
+    text_token_str: Optional[str] = None
+
+@dataclass
+class AudioOutput:
+  
+    # 스피커로 재생할 PCM Audio Bytes (Int16)
+    audio_bytes: bytes
+    
+    # (선택) 이 오디오가 어떤 텍스트에서 나왔는지 (자막용)
+    text_log: Optional[str] = None
 ```
 
 ## 3) Endpoints

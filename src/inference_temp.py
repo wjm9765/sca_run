@@ -7,7 +7,6 @@ from typing import Optional
 # Moshi 스타일 로거
 try:
     from .utils.client_utils import log, get_logger
-    from .utils.compile import torch_compile_lazy
 except ImportError:
     def log(level, msg): print(f"[{level.upper()}] {msg}")
     def get_logger(): 
@@ -41,15 +40,15 @@ class Qwen3DuplexLogic:
         self.model = model
         self.device = model.device 
         
-        # # # [필수] Attention 충돌(RuntimeError) 방지를 위한 Eager 모드 강제 설정
-        # # # 모델 내부 로직을 타더라도 이 설정은 꼭 필요합니다.
-        # # def force_eager(module):
-        # #     if hasattr(module, "config"):
-        # #         module.config._attn_implementation = "eager"
+        # [필수] Attention 충돌(RuntimeError) 방지를 위한 Eager 모드 강제 설정
+        # 모델 내부 로직을 타더라도 이 설정은 꼭 필요합니다.
+        def force_eager(module):
+            if hasattr(module, "config"):
+                module.config._attn_implementation = "eager"
         
-        # force_eager(self.model)
-        # if hasattr(self.model, "thinker"): force_eager(self.model.thinker)
-        # if hasattr(self.model, "talker"): force_eager(self.model.talker.model)
+        force_eager(self.model)
+        if hasattr(self.model, "thinker"): force_eager(self.model.thinker)
+        if hasattr(self.model, "talker"): force_eager(self.model.talker.model)
 
         # Device Mapping
         if hasattr(model, "thinker"):
@@ -75,8 +74,7 @@ class Qwen3DuplexLogic:
         except:
             self.audio_dtype = model.dtype
 
-        # ★ [Compilation] 정적인 Code2Wav 디코더를 컴파일하여 CPU 오버헤드 제거
-        self.decode_audio_compiled = torch_compile_lazy(self._decode_audio_raw)
+    # _calc_audio_token_count 함수 삭제됨 (요청 반영)
 
     @torch.no_grad()
     def thinker_step(self, input_ids, input_features, feature_attention_mask, past_key_values, fixed_audio_tokens=4):
@@ -230,24 +228,15 @@ class Qwen3DuplexLogic:
             dummy_codes = torch.randint(0, 1024, (1, self.num_quantizers), device=self.talker_device)
             return dummy_codes, past_key_values
 
-    # [Compilable Inner Function]
-    def _decode_audio_raw(self, audio_codes):
-        return self.model.code2wav(audio_codes)
-
     @torch.no_grad()
     def decode_audio(self, audio_codes: torch.Tensor) -> np.ndarray:
         target_device = self.code2wav_device
         if audio_codes.device != target_device:
             audio_codes = audio_codes.to(target_device)
-        if audio_codes.dim() == 2: 
+        if audio_codes.dim() == 2:
             audio_codes = audio_codes.unsqueeze(-1)
             
-        if not audio_codes.is_contiguous():
-            audio_codes = audio_codes.contiguous()
-            
-        # ★ 컴파일된 함수 호출 (첫 실행 시 컴파일 오버헤드 있음)
-        wav_tensor = self.decode_audio_compiled(audio_codes)
-        
+        wav_tensor = self.model.code2wav(audio_codes)
         wav_cpu = wav_tensor.to("cpu", non_blocking=True).float().numpy()
         return wav_cpu
 
@@ -299,9 +288,6 @@ class Qwen3OmniFullDuplexEngine:
                 past_key_values=None
             )
             self.thinker_kv_cache = out.past_key_values
-            #compile
-            dummy_codes = torch.zeros((1, 16, 1), dtype=torch.long, device=self.logic.code2wav_device)
-            self.logic.decode_audio(dummy_codes)
             
         log("info", "Engine Ready.")
         
