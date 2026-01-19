@@ -1,92 +1,86 @@
-"""Team-owned inference hook.
-
-Single interface to call teammate's Qwen3-Omni inference pipeline.
-Handles both direct waveform and codec-to-waveform decoding transparently.
-"""
-
 from __future__ import annotations
 
-import importlib
+"""Team inference integration point.
+
+This project intentionally keeps Qwen3-Omni inference out of the UI server.
+The server extracts audio features ([1,128,T]) on CPU and calls *this* module.
+
+When the team delivers the fine-tuned Qwen3-Omni inference code, plug it in by
+editing `infer_team_wav()` (or by importing your code inside it).
+
+Required interface for this scaffold:
+  - Input: `AudioInput` whose `features` is a CPU torch.Tensor [1,128,T]
+  - Output: `TeamAudioReturn` with `wav` float waveform and `sample_rate`
+
+Return wav as:
+  - numpy.ndarray float32 in [-1,1], shape [T] (preferred)
+  - (also accepted) torch.Tensor on CPU
+"""
+
 import os
-from typing import Any, Dict, Optional
+from functools import lru_cache
+from typing import Optional
+
+import numpy as np
+import torch
+
+from .config import AppConfig
+from .io_types import AudioInput, TeamAudioReturn
 
 
-_PIPELINE: Any = None
+def _env(key: str, default: str = "") -> str:
+    v = os.getenv(key)
+    return default if v is None else v
 
 
-class TeamPipeline:
-    """Placeholder for teammate's inference pipeline."""
+@lru_cache(maxsize=1)
+def _load_team_backend():
+    """Optional dynamic loader.
 
-    def __init__(self, cfg):
-        self.cfg = cfg
+    If you want to keep this repo untouched and load the team code via env vars,
+    set:
+      - SCA_TEAM_MODULE (e.g. "my_team_pkg.infer")
+      - SCA_TEAM_FACTORY (e.g. "build_infer")
 
-    def infer(self, audio_in, *, user_text: str = "") -> Dict[str, Any]:
-        """Run inference and return dict with 'text', 'wav_f32' or 'audio_codes', 'sr'."""
-        raise NotImplementedError(
-            "TeamPipeline.infer() is not implemented. "
-            "Either (a) implement it in sca_run/team_infer.py, "
-            "or (b) set SCA_TEAM_INFER_MODULE and SCA_TEAM_INFER_CLASS to load your teammate's pipeline."
-        )
-
-
-def _get_pipeline(cfg) -> Any:
-    """Load and cache teammate's pipeline from environment vars or use placeholder."""
-    global _PIPELINE
-    if _PIPELINE is not None:
-        return _PIPELINE
-
-    mod_name = os.getenv("SCA_TEAM_INFER_MODULE", "")
-    cls_name = os.getenv("SCA_TEAM_INFER_CLASS", "")
-
-    if mod_name and cls_name:
-        mod = importlib.import_module(mod_name)
-        cls = getattr(mod, cls_name)
-        _PIPELINE = cls(cfg)
-        return _PIPELINE
-
-    _PIPELINE = TeamPipeline(cfg)
-    return _PIPELINE
-
-
-def _to_numpy_f32(wav_obj: Any):
-    """Convert tensor or array to float32 numpy array."""
-    import numpy as np
-    try:
-        import torch
-        if torch.is_tensor(wav_obj):
-            return wav_obj.to("cpu").float().numpy()
-    except Exception:
-        pass
-    return np.asarray(wav_obj, dtype=np.float32)
-
-
-def infer_audio_input_once_result(cfg, audio_in, user_text: str = "") -> Dict[str, Any]:
-    """Run inference pipeline and return normalized audio dict.
-    
-    Handles both output types:
-    - Direct waveform: returns wav_f32 directly
-    - Codec codes: decodes via pipeline.decode_audio()
-    
-    Returns dict with keys: text, wav_f32 (np.ndarray), sr (sample rate)
+    The factory should return an object with:
+      - infer(features: torch.Tensor) -> (wav: np.ndarray|torch.Tensor, sample_rate: int)
     """
-    pipeline = _get_pipeline(cfg)
-    out = pipeline.infer(audio_in, user_text=user_text)
 
-    if not isinstance(out, dict):
-        raise TypeError("Team pipeline must return a dict.")
+    mod_name = _env("SCA_TEAM_MODULE", "")
+    factory_name = _env("SCA_TEAM_FACTORY", "")
+    if not mod_name or not factory_name:
+        return None
 
-    text = (out.get("text") or "")
-    sr = int(out.get("sr") or getattr(cfg.qwen, "talker_sample_rate", 24000))
+    import importlib
 
-    # Return waveform if already decoded
-    wav = out.get("wav_f32")
-    if wav is not None:
-        return {"text": text, "wav_f32": _to_numpy_f32(wav), "sr": sr}
+    mod = importlib.import_module(mod_name)
+    factory = getattr(mod, factory_name)
+    return factory()
 
-    # Decode from audio codes if provided
-    codes = out.get("audio_codes")
-    if codes is not None:
-        wav = pipeline.decode_audio(codes)
-        return {"text": text, "wav_f32": _to_numpy_f32(wav), "sr": sr}
 
-    return {"text": text, "wav_f32": None, "sr": sr}
+def infer_team_wav(cfg: AppConfig, audio_in: AudioInput) -> Optional[TeamAudioReturn]:
+    """Call the team inference backend and return a float waveform.
+
+    This default implementation returns None (no audio) until the team backend
+    is plugged in.
+    """
+
+    backend = _load_team_backend()
+    if backend is None:
+        # Not configured yet.
+        return None
+
+    # Team backend chooses devices; we keep features on CPU.
+    wav, sr = backend.infer(audio_in.features)
+
+    if isinstance(wav, torch.Tensor):
+        wav_np = wav.detach().to("cpu").float().numpy()
+    else:
+        wav_np = np.asarray(wav, dtype=np.float32)
+
+    # Normalize shape to [T]
+    if wav_np.ndim >= 2:
+        # If [1, T] or [B, T], take first batch
+        wav_np = wav_np.reshape(-1)
+
+    return TeamAudioReturn(wav=wav_np, sample_rate=int(sr), channels=1)

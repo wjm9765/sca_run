@@ -2,10 +2,10 @@ fastapi>=0.110
 uvicorn[standard]>=0.27
 python-multipart>=0.0.9
 
-# Local Qwen3-Omni inference (Transformers)
-# NOTE: Install an appropriate PyTorch build for your environment separately.
-transformers==4.57.3
-accelerate>=0.26
+# Used for feature extraction + PCM conversion.
+numpy>=1.24
 
-# Optional but recommended for speed (GPU only):
-# flash-attn
+# NOTE:
+# - We do NOT install/launch Qwen3-Omni here.
+# - Install the team's inference package separately (it will use GPU).
+# - Make sure your environment already has an appropriate PyTorch build.
