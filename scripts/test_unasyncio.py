@@ -13,7 +13,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 # 패키지 임포트
 from src.inference import Qwen3OmniFullDuplexEngine, EngineConfig
-from src.client_utils import log 
+from sca_run.src.utils.client_utils import log 
 from transformers import Qwen3OmniMoeForConditionalGeneration, Qwen3OmniMoeProcessor
 
 # 메모리 설정

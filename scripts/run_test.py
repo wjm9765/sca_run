@@ -14,7 +14,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 # 패키지 경로
 from src.inference import Qwen3OmniFullDuplexEngine, EngineConfig
-from src.client_utils import log # 로그 유틸
+from sca_run.src.utils.client_utils import log # 로그 유틸
 
 from transformers import Qwen3OmniMoeForConditionalGeneration, Qwen3OmniMoeProcessor
 
@@ -101,7 +101,7 @@ async def main_async():
         args.model_path,
         device_map={"": 0},
         torch_dtype=torch.bfloat16, 
-        attn_implementation='sdpa',
+        attn_implementation='flash_attention_2',
         trust_remote_code=True
     )
     processor = Qwen3OmniMoeProcessor.from_pretrained(args.model_path, trust_remote_code=True)
