@@ -4,7 +4,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Optional
 
-# Moshi 스타일 로거 임포트 (기존 유지)
+# Moshi 스타일 로거 임포트
 try:
     from .client_utils import log, get_logger
 except ImportError:
@@ -32,14 +32,13 @@ class EngineConfig:
     )
 
 # =============================================================================
-# 2. 로직 클래스 (Stateless Tensor Operations) - [수정 완료]
+# 2. 로직 클래스 (Stateless Tensor Operations)
 # =============================================================================
 class Qwen3DuplexLogic:
     def __init__(self, model):
         self.model = model
         self.device = model.device 
         
-        # 분산 환경 고려한 디바이스 매핑
         if hasattr(model, "thinker"):
             self.thinker_device = model.thinker.device
         else:
@@ -63,16 +62,14 @@ class Qwen3DuplexLogic:
         except:
             self.audio_dtype = model.dtype
 
-    # [삭제됨] _calc_audio_token_count 제거 (get_audio_features 결과 사용)
+    # [삭제됨] _calc_audio_token_count 함수 제거 (요청사항 반영)
 
     @torch.no_grad()
     def thinker_step(self, input_ids, input_features, feature_attention_mask, past_key_values):
         """
-        Thinker Step: Audio or Text Input -> Next Token Prediction
-        [변경점] 
-        1. step_idx 인자 제거: position_ids 수동 관리 안 함
-        2. get_audio_features 활용: 실제 오디오 토큰 수 자동 반영
-        3. inputs_embeds 직접 주입: 인덱스 에러 방지
+        Thinker Step
+        - position_ids 수동 관리 제거 (past_key_values가 있으면 모델이 알아서 계산)
+        - Audio Token Length 자동 계산 (get_audio_features 활용)
         """
         target_device = self.thinker_device
         inputs_embeds = None
@@ -85,23 +82,31 @@ class Qwen3DuplexLogic:
                 input_features = input_features.to(target_device)
             input_features = input_features.to(dtype=self.audio_dtype)
 
-            # Mask 처리 (Time 축)
+            # [FIX 1] Mask가 없으면 강제로 생성 (AttributeError: NoneType... 해결)
             if feature_attention_mask is None:
-                # [Batch, Mel, Time] -> Time=dim 2
-                audio_seq_len = torch.tensor([input_features.shape[2]], device=target_device)
+                # input_features shape: [Batch, Mel, Time]
+                batch_size = input_features.shape[0]
+                time_dim = input_features.shape[2]
+                feature_attention_mask = torch.ones(
+                    (batch_size, time_dim), 
+                    dtype=torch.long, 
+                    device=target_device
+                )
             else:
                 if feature_attention_mask.device != target_device:
                     feature_attention_mask = feature_attention_mask.to(target_device)
-                audio_seq_len = feature_attention_mask.sum(dim=1)
 
-            # ★ 핵심: 실제 오디오 임베딩 추출 (길이 자동 결정)
+            # [FIX 2] 실제 오디오 임베딩 추출 (원본 코드 철학 준수)
+            # mask를 넘겨주므로 내부에서 길이 계산 에러가 안 남
+            audio_seq_len = feature_attention_mask.sum(dim=1)
             actual_audio_embeds = self.model.thinker.get_audio_features(
                 input_features,
                 feature_attention_mask=feature_attention_mask,
                 audio_feature_lengths=audio_seq_len
             )
             
-            # shape 맞추기용 input_ids 생성
+            # [FIX 3] Tensor Size Mismatch 해결
+            # 실제 추출된 임베딩 길이만큼 input_ids(Placeholder)를 생성
             actual_token_count = actual_audio_embeds.shape[1]
             audio_token_id = self.model.config.thinker_config.audio_token_id
             
@@ -121,15 +126,19 @@ class Qwen3DuplexLogic:
         elif input_ids is not None:
             if input_ids.device != target_device:
                 input_ids = input_ids.to(target_device)
-            # Text 모드: inputs_embeds=None 상태 유지 (모델 내부에서 생성)
+            # Text는 inputs_embeds 없이 input_ids만 넘기면 됨
+            pass
             
         else:
             raise ValueError("ThinkerStep: input_ids and input_features are both None")
 
         # ---------------------------------------------------------------------
-        # Forward Pass (No manual position_ids)
+        # Forward Pass (position_ids 외부 주입 제거)
         # ---------------------------------------------------------------------
-        # past_key_values가 있으면 모델이 알아서 position_ids를 이어 붙임
+        # input_ids가 audio_token_id로 채워져 있으면, 
+        # 모델 내부(get_rope_index)에서 알아서 mRoPE(3D Position)를 적용함.
+        # past_key_values가 있으면 자동으로 이어서 계산함.
+        
         outputs = self.model.thinker(
             input_ids=input_ids,
             inputs_embeds=inputs_embeds, 
@@ -144,10 +153,8 @@ class Qwen3DuplexLogic:
     @torch.no_grad()
     def talker_step(self, thinker_hidden, past_key_values, input_ids=None):
         """
-        Talker Step: Thinker Hidden -> Audio Code Generation
-        [변경점]
-        1. step_idx 인자 제거
-        2. position_ids, max_pos_limit 관련 로직 전면 삭제
+        Talker Step
+        - position_ids 수동 관리 제거
         """
         target_device = self.talker_device
         
@@ -157,7 +164,7 @@ class Qwen3DuplexLogic:
         if not thinker_hidden.is_contiguous():
             thinker_hidden = thinker_hidden.contiguous()
 
-        # 2. Projection (Thinker Dim -> Talker Dim)
+        # 2. Projection
         conditioned_hidden = self.model.talker.text_projection(thinker_hidden)
         
         # 3. Talker Input Prep
@@ -171,8 +178,7 @@ class Qwen3DuplexLogic:
         audio_embed = self.model.talker.model.get_input_embeddings()(input_ids)
         talker_inputs_embeds = audio_embed + conditioned_hidden
         
-        # 5. Talker Forward (No manual position_ids)
-        # Talker도 Causal LM이므로 KV Cache만 잘 주면 알아서 연산함
+        # 5. Talker Forward (자동 Position ID)
         talker_out = self.model.talker.model(
             inputs_embeds=talker_inputs_embeds,
             past_key_values=past_key_values,
@@ -180,7 +186,7 @@ class Qwen3DuplexLogic:
             return_dict=True
         )
 
-        # 6. Code Predictor (Residual Quantization)
+        # 6. Code Predictor Logic
         logits = self.model.talker.codec_head(talker_out.last_hidden_state[:, -1, :])
         layer0_code = logits.argmax(dim=-1, keepdim=True)
         
@@ -191,7 +197,6 @@ class Qwen3DuplexLogic:
         predictor_codes = [layer0_code]
         predictor_kv = None 
         
-        # Autoregressive Loop for RVQ
         for i in range(self.num_quantizers - 1):
             pred_out = self.model.talker.code_predictor.model(
                 inputs_embeds=predictor_input,
@@ -223,7 +228,7 @@ class Qwen3DuplexLogic:
         return wav_cpu
 
 # =============================================================================
-# 3. 엔진 클래스 (Asyncio + Executor) - [수정 완료: step_count 제거]
+# 3. 엔진 클래스 (Asyncio + Executor)
 # =============================================================================
 class Qwen3OmniFullDuplexEngine:
     def __init__(self, model, tokenizer, config: EngineConfig):
@@ -232,11 +237,11 @@ class Qwen3OmniFullDuplexEngine:
         self.cfg = config
         self.logic = Qwen3DuplexLogic(model)
         
-        self.input_queue = None
-        self.hidden_queue = None
-        self.output_queue = None
+        self.input_queue = asyncio.Queue()
+        self.hidden_queue = asyncio.Queue()
+        self.output_queue = asyncio.Queue()
         
-        # ★ KV Cache만 유지 (step_count 삭제)
+        # [삭제됨] step_count 변수들 제거 (KV Cache가 알아서 함)
         self.thinker_kv_cache = None
         self.talker_kv_cache = None
         self.last_talker_token = None
@@ -251,18 +256,16 @@ class Qwen3OmniFullDuplexEngine:
         self.hidden_queue = asyncio.Queue()
         self.output_queue = asyncio.Queue()
 
-        # System Prompt
         initial_ids = self.tokenizer(
             self.cfg.system_prompt_text, 
             return_tensors="pt", 
             add_special_tokens=False
         ).input_ids.to(self.logic.thinker_device)
         
-        # Talker Init
         codec_bos = self.model.config.talker_config.codec_bos_id
         self.last_talker_token = torch.tensor([[codec_bos]], device=self.logic.talker_device)
 
-        # Prefill (step_idx 없이 호출)
+        # Prefill (step_idx 인자 제거됨)
         with torch.no_grad():
             out = self.logic.thinker_step(
                 input_ids=initial_ids, 
@@ -275,68 +278,62 @@ class Qwen3OmniFullDuplexEngine:
         log("info", "Engine Ready.")
         
     async def _thinker_loop(self):
+        log("info", "🚀 Thinker Loop Started")
         loop = asyncio.get_running_loop()
         
         while self.is_running:
             audio_features = await self.input_queue.get()
             
             def run_thinker_inference():
-                with torch.no_grad():
-                    # ---------------------------------------------------------
-                    # [Step 1] 듣기 (Listening) - step_idx 없이 호출
-                    # ---------------------------------------------------------
-                    thinker_out = self.logic.thinker_step(
-                        input_ids=None, 
-                        input_features=audio_features,
-                        feature_attention_mask=None,
-                        past_key_values=self.thinker_kv_cache
-                    )
-                    
-                    self.thinker_kv_cache = thinker_out.past_key_values
-
-                    # ---------------------------------------------------------
-                    # [Step 2] 판단 (Decision)
-                    # ---------------------------------------------------------
-                    next_token = thinker_out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
-                    token_id = next_token.item()
-                    
-                    # [옵션] Silence 토큰 처리 (필요시 주석 해제)
-                    # if token_id == self.cfg.silence_token_id:
-                    #     return None, "<|silence|>"
-
-                    log("debug", f"Thinker predicted: {token_id}")
-
-                    # ---------------------------------------------------------
-                    # [Step 3] 말하기 (Speaking) - 순수 텍스트 생성
-                    # ---------------------------------------------------------
-                    current_turn_hiddens = []
-                    token_str = ""
-                    
-                    for _ in range(self.cfg.text_output_tokens):
-                        # Text Generation (step_idx 없이 호출)
+                try:
+                    with torch.no_grad():
+                        # [Step 1] 듣기 (Listening) - step_idx 없이 호출
                         thinker_out = self.logic.thinker_step(
-                            input_ids=next_token,
-                            input_features=None,
+                            input_ids=None, 
+                            input_features=audio_features,
                             feature_attention_mask=None,
                             past_key_values=self.thinker_kv_cache
                         )
-                        
                         self.thinker_kv_cache = thinker_out.past_key_values
-                        
-                        # Talker에게 보낼 Hidden State 저장
-                        safe_hidden = thinker_out.hidden_states[-1].detach().clone()
-                        current_turn_hiddens.append(safe_hidden)
-                        
-                        # Next Token
+
+                        # [Step 2] 판단 (Decision)
                         next_token = thinker_out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
-                        token_str += self.tokenizer.decode([next_token.item()])
-                    
-                    final_hidden_to_send = torch.cat(current_turn_hiddens, dim=1).contiguous()
-                    return final_hidden_to_send, token_str
+                        token_id = next_token.item()
+                        log("debug", f"🧠 Thinker predicted: {token_id}")
+
+                        # [Step 3] 말하기 (Speaking) - 순수 텍스트 생성
+                        current_turn_hiddens = []
+                        token_str = ""
+                        
+                        for _ in range(self.cfg.text_output_tokens):
+                            # Text Generation - step_idx 없이 호출
+                            thinker_out = self.logic.thinker_step(
+                                input_ids=next_token,
+                                input_features=None,
+                                feature_attention_mask=None,
+                                past_key_values=self.thinker_kv_cache
+                            )
+                            
+                            self.thinker_kv_cache = thinker_out.past_key_values
+                            
+                            safe_hidden = thinker_out.hidden_states[-1].detach().clone()
+                            current_turn_hiddens.append(safe_hidden)
+                            
+                            next_token = thinker_out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+                            token_str += self.tokenizer.decode([next_token.item()])
+                        
+                        final_hidden_to_send = torch.cat(current_turn_hiddens, dim=1).contiguous()
+                        return final_hidden_to_send, token_str
+                except Exception as e:
+                    log("error", f"💥 Thinker Loop Crashed: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    return None, ""
 
             stacked_hidden, log_str = await loop.run_in_executor(None, run_thinker_inference)
             
-            get_logger().print_token(log_str)
+            if log_str:
+                get_logger().print_token(log_str)
 
             if stacked_hidden is not None:
                 await self.hidden_queue.put(stacked_hidden)
@@ -351,14 +348,13 @@ class Qwen3OmniFullDuplexEngine:
             def run_talker_inference():
                 with torch.no_grad():
                     num_hiddens = source_hidden.shape[1]
-                    # Audio/Text 비율에 따라 반복 생성 (보통 4:2 = 2배)
                     ratio = self.cfg.audio_output_tokens // self.cfg.text_output_tokens
                     output_chunks = []
 
                     for i in range(num_hiddens):
                         one_hidden = source_hidden[:, i:i+1, :]
                         for _ in range(ratio):
-                            # Talker Step (step_idx 없이 호출)
+                            # Talker Step - step_idx 없이 호출
                             codes, new_kv = self.logic.talker_step(
                                 thinker_hidden=one_hidden,
                                 past_key_values=self.talker_kv_cache,
