@@ -26,7 +26,7 @@ full = [
     "accelerate>=1.0.0",
     "librosa>=0.10.0",
     "numba>=0.60.0",
-    "flash-attn>=2.6.3",
+#    "flash-attn>=2.6.3",
     "bitsandbytes",
 ]
 
