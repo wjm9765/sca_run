@@ -184,6 +184,7 @@ class TeamInferenceSession:
         audio_in.features는 이제 Raw Float Tensor (1D) 또는 기존 Features (2D)일 수 있음.
         """
         if not self.started:
+            log("warning", "TeamInferenceSession not started, ignoring input.")
             return
 
         # 1. 입력 데이터 확인
@@ -204,6 +205,8 @@ class TeamInferenceSession:
              if data.ndim < 2 or (data.ndim == 2 and data.shape[-2] != 128):
                 is_raw_audio = True
 
+        log("info", f"[TeamInfer] push_input called. is_raw_audio={is_raw_audio}, shape={data.shape if hasattr(data, 'shape') else 'unknown'}")
+
         if is_raw_audio:
             # run_test.py 로직 적용
             # chunk = numpy array
@@ -218,6 +221,7 @@ class TeamInferenceSession:
                 # pad right
                 chunk = np.pad(chunk, (0, target_len - len(chunk)))
             
+            log("info", f"[TeamInfer] Extracting features... (chunk len: {len(chunk)})")
             # Feature Extraction via Processor
             features = self.processor.feature_extractor(
                 [chunk], 
@@ -230,7 +234,8 @@ class TeamInferenceSession:
             # NaN Check
             if torch.isnan(input_features).any() or torch.isinf(input_features).any():
                 input_features = torch.nan_to_num(input_features, nan=0.0, posinf=0.0, neginf=0.0)
-                
+            
+            log("info", f"[TeamInfer] Pushing to Engine Queue... Feature shape: {input_features.shape}")
             await self.engine.push_audio(input_features)
             
         else:

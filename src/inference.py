@@ -300,7 +300,8 @@ class Qwen3OmniFullDuplexEngine:
         while self.is_running:
             try:
                 audio_features = await self.input_queue.get()
-                
+                log("info", "[Thinker] Start Processing Audio Chunk...")
+
                 # --- [Step 1] Listening (오디오 인코딩) ---
                 def listen_and_predict_first():
                     with torch.no_grad():
@@ -314,11 +315,14 @@ class Qwen3OmniFullDuplexEngine:
                 curr_token, self.thinker_kv_cache = await loop.run_in_executor(None, listen_and_predict_first)
                 
                 if curr_token.item() == self.cfg.silence_token_id:
+                    log("info", "[Thinker] Detected Silence.")
                     continue
+
+                log("info", f"[Thinker] First token predicted: {curr_token.item()}")
 
                 # --- [Step 2] Streaming Loop (1개 만들자마자 전송) ---
                 # ★ 여기가 핵심: executor를 루프 안에서 돌려서, 1개 생성 후 즉시 큐에 넣음
-                for _ in range(self.cfg.text_output_tokens):
+                for i in range(self.cfg.text_output_tokens):
                     
                     def generate_one_token(token_in, kv_in):
                         with torch.no_grad():
@@ -340,6 +344,9 @@ class Qwen3OmniFullDuplexEngine:
                     if not hidden_chunk.is_contiguous():
                         hidden_chunk = hidden_chunk.contiguous()
                     await self.hidden_queue.put(hidden_chunk)
+                    
+                    if i == 0:
+                        log("info", "[Thinker] First hidden chunk sent to Talker.")
 
             except Exception as e:
                 log("error", f"Thinker Error: {e}")
@@ -351,6 +358,7 @@ class Qwen3OmniFullDuplexEngine:
             try:
                 # ★ 1개씩 받음 (배치 아님, shape: [1, 1, 4096])
                 source_hidden = await self.hidden_queue.get()
+                # log("info", "[Talker] Received hidden state.")
                 
                 def run_talker_single_step(hidden_state):
                     with torch.no_grad():
@@ -374,6 +382,7 @@ class Qwen3OmniFullDuplexEngine:
 
                 # 오디오 생성
                 wav_chunks_np = await loop.run_in_executor(None, run_talker_single_step, source_hidden)
+                # log("info", f"[Talker] Generated {len(wav_chunks_np)} audio chunks.")
                 
                 for wav_np in wav_chunks_np:
                     wav_int16 = (wav_np * 32767).astype(np.int16).tobytes()
