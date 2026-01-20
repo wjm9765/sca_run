@@ -15,11 +15,11 @@
 <body>
   <h3>sca_run</h3>
   <div>
-    <button id="micBtn">Mic ON</button>
-    <button id="runBtn" disabled>Start Qwen</button>
+    <button id="runBtn">Start Qwen</button>
+    <button id="micBtn" disabled>Mic ON</button>
     <button id="spkBtn" disabled>Speaker OFF</button>
   </div>
-  <div id="status" class="small">Idle.</div>
+  <div id="status" class="small">Idle. Click 'Start Qwen' to initialize model.</div>
   <div id="log" class="small"></div>
 
 <script>
@@ -126,9 +126,14 @@
     zeroGain.connect(audioCtx.destination);
 
     micOn = true;
-    runBtn.disabled = false;
     micBtn.textContent = 'Mic OFF';
-    setStatus(`Mic ON. Browser SR=${audioCtx.sampleRate} -> sending ${TARGET_SR}Hz mono PCM16 when Qwen starts.`);
+    
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        sending = true;
+        setStatus(`Mic Streaming ON. Sending ${TARGET_SR}Hz mono PCM16.`);
+    } else {
+        setStatus(`Mic ON (Local). Waiting for Qwen connection...`);
+    }
   }
 
   async function stopMic() {
@@ -153,9 +158,9 @@
     zeroGain = null;
 
     micOn = false;
+    sending = false; // Stop sending
     micBtn.textContent = 'Mic ON';
-    runBtn.disabled = true;
-    setStatus('Mic OFF.');
+    setStatus('Mic OFF. Streaming stopped.');
   }
 
   function wsUrl() {
@@ -202,26 +207,19 @@
 
     const src = playCtx.createBufferSource();
     src.buffer = audioBuffer;
-    src.connect(playCtx.destination);
-    src.start();
-  }
-
-  function startQwen() {
-    if (sending) return;
-    if (!micOn) {
-      log('Turn mic on first.');
-      return;
-    }
+    // if (!micOn) { ... } -> Removed requirement to have Mic ON first
+    if (ws) return;
 
     ws = new WebSocket(wsUrl());
     ws.binaryType = 'arraybuffer';
 
     ws.onopen = () => {
-      sending = true;
+      // connecting...
+      sending = false; // Wait for server_ready
       runBtn.textContent = 'Stop Qwen';
-      spkBtn.disabled = false;
-      setStatus('Streaming audio to server... (server will chunk into 4 frames per request)');
-      log('WS connected: ' + wsUrl());
+      // Disable Run Button temporarily? No, allow stop.
+      setStatus('Connected to Server. Initializing Qwen Model (Please wait)...');
+      log('WS connected. Waiting for engine...');
     };
 
     ws.onmessage = (ev) => {
@@ -230,6 +228,15 @@
         try {
           const obj = JSON.parse(ev.data);
           if (obj && typeof obj === 'object') {
+            // [Added] Check server_ready
+            if (obj.type === "server_ready") {
+                micBtn.disabled = false;
+                spkBtn.disabled = false;
+                setStatus('Model Initialized! Please click "Mic ON" to start speaking.');
+                log(`✅ ${obj.message}`);
+                return;
+            }
+
             if (obj.type === 'talker_audio') {
               pendingAudioMeta = obj;
               if (obj.text_log) log('talker: ' + obj.text_log);
@@ -262,9 +269,15 @@
 
     ws.onclose = () => {
       sending = false;
+      ws = null;
       runBtn.textContent = 'Start Qwen';
+      micBtn.disabled = true;
       spkBtn.disabled = true;
-      setStatus(micOn ? 'Mic ON. Qwen stopped.' : 'Idle.');
+      
+      // Stop mic if it was running? Or keep it? Use case seems to require mic is slave to Qwen connection usually
+      if (micOn) stopMic(); 
+      
+      setStatus('Disconnected.');
       log('WS closed.');
     };
 
@@ -276,18 +289,24 @@
   function stopQwen() {
     if (!ws) return;
     try { ws.close(); } catch (e) {}
-    ws = null;
-    sending = false;
-    runBtn.textContent = 'Start Qwen';
+    // cleanup handles in onclose
   }
 
   micBtn.addEventListener('click', async () => {
     try {
-      if (!micOn) await startMic();
-      else await stopMic();
+      if (!micOn) {
+          await startMic();
+      } else {
+          await stopMic();
+      }
     } catch (e) {
       log('Mic error: ' + (e && e.message ? e.message : String(e)));
       setStatus('Mic error.');
+    }
+  });
+
+  runBtn.addEventListener('click', () => {
+    if (!ws'Mic error.');
     }
   });
 

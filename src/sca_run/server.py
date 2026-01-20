@@ -239,6 +239,12 @@ async def ws_pcm16(websocket: WebSocket):
     # Start the engine first
     await session.start()
 
+    # Notify client that server is ready
+    await websocket.send_json({
+        "type": "server_ready",
+        "message": "Engine started. Ready to receive audio."
+    })
+
     # Run all tasks concurrently
     try:
         await asyncio.gather(
