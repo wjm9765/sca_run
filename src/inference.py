@@ -4,16 +4,11 @@ import asyncio
 from dataclasses import dataclass
 from typing import Optional
 
-# Moshi 스타일 로거
 try:
-    from .utils.client_utils import log, get_logger
+    from .utils.client_utils import log
     from .utils.compile import torch_compile_lazy
 except ImportError:
     def log(level, msg): print(f"[{level.upper()}] {msg}")
-    def get_logger(): 
-        class FallbackLogger:
-            def print_token(self, t, color=None): print(t, end="", flush=True)
-        return FallbackLogger()
 
 import os
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -45,16 +40,6 @@ class Qwen3DuplexLogic:
     def __init__(self, model):
         self.model = model
         self.device = model.device 
-        
-        # # # [필수] Attention 충돌(RuntimeError) 방지를 위한 Eager 모드 강제 설정
-        # # # 모델 내부 로직을 타더라도 이 설정은 꼭 필요합니다.
-        # # def force_eager(module):
-        # #     if hasattr(module, "config"):
-        # #         module.config._attn_implementation = "eager"
-        
-        # force_eager(self.model)
-        # if hasattr(self.model, "thinker"): force_eager(self.model.thinker)
-        # if hasattr(self.model, "talker"): force_eager(self.model.talker.model)
 
         # Device Mapping
         if hasattr(model, "thinker"):
@@ -79,14 +64,14 @@ class Qwen3DuplexLogic:
             self.audio_dtype = model.thinker.audio_tower.conv2d1.weight.dtype
         except:
             self.audio_dtype = model.dtype
-
-        self.decode_audio_compiled = self._decode_audio_raw
-
-        self.compiled_predictor = torch_compile_lazy(self.model.talker.code_predictor.model)
+        
+        # talker predictor compile to imporve speed
+        self.compiled_predictor = torch_compile_lazy(self.model.talker.code_predictor.model)    @torch.no_grad()
+    
     @torch.no_grad()
     def thinker_step(self, input_ids, input_features, feature_attention_mask, past_key_values, fixed_audio_tokens=4):
         """
-        Thinker Step: 
+        Thinker Step:   
         - 오디오/텍스트 입력을 받아 모델 내부 로직(Forward)을 통해 다음 토큰 예측
         - 오디오 길이는 4토큰(0.32초)으로 고정 가정
         """
@@ -148,7 +133,7 @@ class Qwen3DuplexLogic:
             # position_ids와 rope_deltas를 전달하지 않음 -> 모델이 내부에서 past_key_values 길이를 보고 자동 계산
             # input_features를 전달함 -> 모델이 내부에서 get_audio_features -> Projection 수행 (차원 불일치 해결)
             
-            outputs = self.model.thinker(
+            return self.model.thinker(
                 input_ids=input_ids,
                 input_features=input_features,       # 오디오 원본 전달 (내부 처리 유도)
                 feature_attention_mask=feature_attention_mask,
@@ -159,10 +144,8 @@ class Qwen3DuplexLogic:
                 return_dict=True
             )
             
-            return outputs
-
         except Exception as e:
-            log("error", f"🚨 Error in thinker_step: {e}")
+            log("error", f" Error in thinker_step: {e}")
             import traceback
             traceback.print_exc()
             raise e
@@ -213,6 +196,7 @@ class Qwen3DuplexLogic:
             predictor_codes = [layer0_code]
             predictor_kv = None 
             
+            #call compiled predictor
             for i in range(self.num_quantizers - 1):
                 pred_out = self.compiled_predictor(
                     inputs_embeds=predictor_input,
@@ -231,14 +215,8 @@ class Qwen3DuplexLogic:
             return full_audio_codes, talker_out.past_key_values
 
         except Exception as e:
-            log("error", f"🚨 Talker Crashed! {e}")
-            dummy_codes = torch.randint(0, 1024, (1, self.num_quantizers), device=self.talker_device)
-            return dummy_codes, past_key_values
-
-
-    #두 함수 나중에 합치기
-    def _decode_audio_raw(self, audio_codes):
-        return self.model.code2wav(audio_codes)
+            log("error", f"Talker Crashed! {e}")
+            raise e
 
     @torch.no_grad()
     def decode_audio(self, audio_codes: torch.Tensor) -> np.ndarray:
@@ -247,16 +225,12 @@ class Qwen3DuplexLogic:
             audio_codes = audio_codes.to(target_device)
         if audio_codes.dim() == 2: 
             audio_codes = audio_codes.unsqueeze(-1)
-            
-        # 컴파일을 껐으므로 clone은 필수는 아니지만, 안전장치로 둠
-        if not audio_codes.is_contiguous():
-            audio_codes = audio_codes.contiguous()
         
-        # 컴파일 없이 바로 실행 (에러 해결)
-        wav_tensor = self.decode_audio_compiled(audio_codes)
+        # 모델 직접 호출 (컴파일 없이 실행하여 안정성 확보)
+        wav_tensor = self.model.code2wav(audio_codes)
         
-        wav_cpu = wav_tensor.to("cpu", non_blocking=True).float().numpy()
-        return wav_cpu
+        # CPU 이동 및 Numpy 변환
+        return wav_tensor.to("cpu", non_blocking=True).float().numpy()
 
 # =============================================================================
 # 3. 엔진 클래스 (Asyncio + Executor)
@@ -272,7 +246,6 @@ class Qwen3OmniFullDuplexEngine:
         self.hidden_queue = asyncio.Queue()
         self.output_queue = asyncio.Queue()
         
-        # ★ [간소화] step_count 관리 제거 (모델 KV Cache가 알아서 함)
         self.thinker_kv_cache = None
         self.talker_kv_cache = None
         self.last_talker_token = None
@@ -307,114 +280,84 @@ class Qwen3OmniFullDuplexEngine:
             )
             self.thinker_kv_cache = out.past_key_values
             #compile / 나중에 안하는 decode_audio 부분 삭제
-            last_hidden = out.hidden_states[-1][:, -1:, :].detach().clone()
             
             log("info", "   ... Compiling Talker Inner Loop (Wait a moment)")
-            _, _ = self.logic.talker_step(
-                thinker_hidden=last_hidden,
-                past_key_values=None,
-                input_ids=self.last_talker_token
+            # 2. Talker Compile Trigger
+            last_hidden = out.hidden_states[-1][:, -1:, :].detach().clone()
+            self.logic.talker_step(
+                thinker_hidden=last_hidden, past_key_values=None, input_ids=self.last_talker_token
             )
-
-            # 3. Decoder Warmup (컴파일은 안 하지만 캐시 로딩 등 위해 실행)
-            log("info", "   ... Initializing Audio Decoder")
-            dummy_codes = torch.zeros((1, 16, 1), dtype=torch.long, device=self.logic.code2wav_device)
-            self.logic.decode_audio(dummy_codes)
             
         log("info", "Engine Ready.")
         
     async def _thinker_loop(self):
-        log("info", "🚀 Thinker Loop Started")
         loop = asyncio.get_running_loop()
         
         while self.is_running:
-            audio_features = await self.input_queue.get()
-            
-            def run_thinker_inference():
-                try:
+            try:
+                audio_features = await self.input_queue.get()
+                
+                # --- [Step 1] Listening (오디오 인코딩) ---
+                def listen_and_predict_first():
                     with torch.no_grad():
-                        # [Step 1] 듣기 (Listening)
-                        # 오디오는 항상 고정 길이(Config 참조)라고 가정하고 넘김
-                        thinker_out = self.logic.thinker_step(
-                            input_ids=None, 
-                            input_features=audio_features,
-                            feature_attention_mask=None,
-                            past_key_values=self.thinker_kv_cache,
-                            fixed_audio_tokens=self.cfg.audio_input_tokens
+                        out = self.logic.thinker_step(
+                            input_ids=None, input_features=audio_features, feature_attention_mask=None,
+                            past_key_values=self.thinker_kv_cache, fixed_audio_tokens=self.cfg.audio_input_tokens
                         )
-                        self.thinker_kv_cache = thinker_out.past_key_values
+                        next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+                        return next_token, out.past_key_values
 
-                        # [Step 2] 판단 (Decision)
-                        next_token = thinker_out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
-                        token_id = next_token.item()
-                        log("debug", f"🧠 Thinker predicted: {token_id}")
+                curr_token, self.thinker_kv_cache = await loop.run_in_executor(None, listen_and_predict_first)
+                
+                if curr_token.item() == self.cfg.silence_token_id:
+                    continue
 
-                        # [Step 3] 말하기 (Speaking)
-                        current_turn_hiddens = []
-                        token_str = ""
-                        
-
-
-                        #if model predicts silence, return None / No excute talker
-                        if token_id == self.cfg.silence_token_id:
-                          return None, "<|silence|>"
-
-
-
-                        for _ in range(self.cfg.text_output_tokens):
-                            # Text Generation
-                            thinker_out = self.logic.thinker_step(
-                                input_ids=next_token,
-                                input_features=None,
-                                feature_attention_mask=None,
-                                past_key_values=self.thinker_kv_cache
+                # --- [Step 2] Streaming Loop (1개 만들자마자 전송) ---
+                # ★ 여기가 핵심: executor를 루프 안에서 돌려서, 1개 생성 후 즉시 큐에 넣음
+                for _ in range(self.cfg.text_output_tokens):
+                    
+                    def generate_one_token(token_in, kv_in):
+                        with torch.no_grad():
+                            out = self.logic.thinker_step(
+                                input_ids=token_in, input_features=None, feature_attention_mask=None,
+                                past_key_values=kv_in
                             )
-                            self.thinker_kv_cache = thinker_out.past_key_values
-                            
-                            safe_hidden = thinker_out.hidden_states[-1].detach().clone()
-                            current_turn_hiddens.append(safe_hidden)
-                            
-                            if not current_turn_hiddens:
-                                return None, token_str # 에러 없이 리턴
+                            # Hidden State 복제 (전송용)
+                            hidden_to_send = out.hidden_states[-1].detach().clone()
+                            next_t = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+                            return hidden_to_send, next_t, out.past_key_values
 
-                            next_token = thinker_out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
-                            token_str += self.tokenizer.decode([next_token.item()])
-                        
-                        final_hidden_to_send = torch.cat(current_turn_hiddens, dim=1).contiguous()
-                        return final_hidden_to_send, token_str
-                except Exception as e:
-                    log("error", f"💥 Thinker Loop Crashed: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    return None, ""
+                    # Executor 실행 (Blocking 방지)
+                    hidden_chunk, curr_token, self.thinker_kv_cache = await loop.run_in_executor(
+                        None, generate_one_token, curr_token, self.thinker_kv_cache
+                    )
 
-            stacked_hidden, log_str = await loop.run_in_executor(None, run_thinker_inference)
-            
-            if log_str:
-                get_logger().print_token(log_str)
+                    # ★ 기다리지 않고 즉시 Talker Queue로 전송
+                    if not hidden_chunk.is_contiguous():
+                        hidden_chunk = hidden_chunk.contiguous()
+                    await self.hidden_queue.put(hidden_chunk)
 
-            if stacked_hidden is not None:
-                await self.hidden_queue.put(stacked_hidden)
+            except Exception as e:
+                log("error", f"Thinker Error: {e}")
 
     async def _talker_loop(self):
-        log("info", "Talker Loop Started")
         loop = asyncio.get_running_loop()
         
         while self.is_running:
-            source_hidden = await self.hidden_queue.get()
-            
-            def run_talker_inference():
-                with torch.no_grad():
-                    num_hiddens = source_hidden.shape[1]
-                    ratio = self.cfg.audio_output_tokens // self.cfg.text_output_tokens
-                    output_chunks = []
+            try:
+                # ★ 1개씩 받음 (배치 아님, shape: [1, 1, 4096])
+                source_hidden = await self.hidden_queue.get()
+                
+                def run_talker_single_step(hidden_state):
+                    with torch.no_grad():
+                        # 텍스트 1개당 오디오 N개 생성
+                        ratio = self.cfg.audio_output_tokens // self.cfg.text_output_tokens
+                        output_chunks = []
 
-                    for i in range(num_hiddens):
-                        one_hidden = source_hidden[:, i:i+1, :]
+                        # 이제 source_hidden은 무조건 1개이므로 바깥 루프 삭제하고 바로 ratio만큼 실행
                         for _ in range(ratio):
-                            # Talker Step (step_idx 없음)
                             codes, new_kv = self.logic.talker_step(
-                                thinker_hidden=one_hidden,
+                                thinker_hidden=hidden_state,
                                 past_key_values=self.talker_kv_cache,
                                 input_ids=self.last_talker_token
                             )
@@ -423,13 +366,17 @@ class Qwen3OmniFullDuplexEngine:
                             
                             wav_np = self.logic.decode_audio(codes)
                             output_chunks.append(wav_np)
-                    return output_chunks
+                        return output_chunks
 
-            wav_chunks_np = await loop.run_in_executor(None, run_talker_inference)
+                # 오디오 생성
+                wav_chunks_np = await loop.run_in_executor(None, run_talker_single_step, source_hidden)
+                
+                for wav_np in wav_chunks_np:
+                    wav_int16 = (wav_np * 32767).astype(np.int16).tobytes()
+                    await self.output_queue.put(wav_int16)
             
-            for wav_np in wav_chunks_np:
-                wav_int16 = (wav_np * 32767).astype(np.int16).tobytes()
-                await self.output_queue.put(wav_int16)
+            except Exception as e:
+                log("error", f"Talker Error: {e}")
 
     async def start(self):
         if self.is_running: return
