@@ -15,6 +15,11 @@ except ImportError:
             def print_token(self, t, color=None): print(t, end="", flush=True)
         return FallbackLogger()
 
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+torch.set_num_threads(1)
+
 # =============================================================================
 # 1. 설정 및 데이터 클래스
 # =============================================================================
@@ -77,8 +82,7 @@ class Qwen3DuplexLogic:
 
         self.decode_audio_compiled = self._decode_audio_raw
 
-        self.model.talker.code_predictor.model = torch_compile_lazy(self.model.talker.code_predictor.model)
-
+        self.compiled_predictor = torch_compile_lazy(self.model.talker.code_predictor.model)
     @torch.no_grad()
     def thinker_step(self, input_ids, input_features, feature_attention_mask, past_key_values, fixed_audio_tokens=4):
         """
@@ -210,7 +214,7 @@ class Qwen3DuplexLogic:
             predictor_kv = None 
             
             for i in range(self.num_quantizers - 1):
-                pred_out = self.model.talker.code_predictor.model(
+                pred_out = self.compiled_predictor(
                     inputs_embeds=predictor_input,
                     past_key_values=predictor_kv,
                     use_cache=True
@@ -368,8 +372,11 @@ class Qwen3OmniFullDuplexEngine:
                             self.thinker_kv_cache = thinker_out.past_key_values
                             
                             safe_hidden = thinker_out.hidden_states[-1].detach().clone()
-                            current_turn_hiddens.append(safe_hidden)
+                            #current_turn_hiddens.append(safe_hidden)
                             
+                            if not current_turn_hiddens:
+                                return None, token_str # 에러 없이 리턴
+
                             next_token = thinker_out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
                             token_str += self.tokenizer.decode([next_token.item()])
                         
