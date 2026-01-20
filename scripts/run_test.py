@@ -111,7 +111,7 @@ async def main_async():
     
     full_audio, sr = load_audio_file(args.input_file, target_sr=16000)
     
-    MAX_DURATION_SEC = 10 # 300초
+    MAX_DURATION_SEC = 0.32 # 300초
     max_samples = int(MAX_DURATION_SEC * sr)
     
     if len(full_audio) > max_samples:

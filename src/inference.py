@@ -372,7 +372,7 @@ class Qwen3OmniFullDuplexEngine:
                             self.thinker_kv_cache = thinker_out.past_key_values
                             
                             safe_hidden = thinker_out.hidden_states[-1].detach().clone()
-                            #current_turn_hiddens.append(safe_hidden)
+                            current_turn_hiddens.append(safe_hidden)
                             
                             if not current_turn_hiddens:
                                 return None, token_str # 에러 없이 리턴
