@@ -35,12 +35,10 @@ The system is pre-configured with the following defaults for optimal performance
 - **Talker Prediction**: approx. 0.64s
 
 ##  Getting Started
-First run uv sync --extra full,cu128 (cuda version depends on your GPU, for CPU only, use the cpu extras) to install the required dependencies.
 
 ### Prerequisites
 - Python 3.10+
 - CUDA-compatible GPU (Recommended for Qwen3-Omni)
-- `ffmpeg` (for audio processing)
 
 ### Installation
 
@@ -52,9 +50,7 @@ First run uv sync --extra full,cu128 (cuda version depends on your GPU, for CPU 
 
 2. Create a virtual environment and install dependencies:
    ```bash
-   python -m venv .venv
-   source .venv/bin/activate
-   pip install -r requirements.txt
+   uv sync --extra full,cu128 (cuda version depends on your GPU, for CPU only, use the cpu extras) to install the required dependencies.
    ```
 
 ### Running the Server
@@ -66,7 +62,7 @@ First run uv sync --extra full,cu128 (cuda version depends on your GPU, for CPU 
 
 2. **Start the Server**:
    ```bash
-   python -m sca_run.server --config config/default.toml --host 0.0.0.0 --port 8000
+   ./scripts/run_demo_server.sh
    ```
    
    The server will start at `http://0.0.0.0:8000`.
