@@ -7,7 +7,7 @@ name = "sca_run"
 version = "0.1.0"
 description = "SCA Run: Qwen3-Omni Full Duplex Server"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.10, <3.13"
 
 dependencies = [
     "fastapi>=0.110",
@@ -22,9 +22,10 @@ dependencies = [
 full = [
     "torch>=2.4.0",
     "torchaudio>=2.4.0",
-    "transformers==4.57.0",
+    "transformers>=4.48.0",
     "accelerate>=1.0.0",
     "librosa>=0.10.0",
+    "numba>=0.60.0",
     "flash-attn>=2.6.3",
     "bitsandbytes",
 ]
@@ -54,6 +55,9 @@ torchaudio = [
     { index = "pytorch-cu128", extra = "cu128" },
     { index = "pytorch-cu130", extra = "cu130" },
 ]
+
+[tool.uv.extra-build-dependencies]
+flash-attn = ["torch>=2.4.0"]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
