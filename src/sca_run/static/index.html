@@ -207,7 +207,11 @@
 
     const src = playCtx.createBufferSource();
     src.buffer = audioBuffer;
-    // if (!micOn) { ... } -> Removed requirement to have Mic ON first
+    src.connect(playCtx.destination);
+    src.start(0);
+  }
+
+  function startQwen() {
     if (ws) return;
 
     ws = new WebSocket(wsUrl());
@@ -306,12 +310,7 @@
   });
 
   runBtn.addEventListener('click', () => {
-    if (!ws'Mic error.');
-    }
-  });
-
-  runBtn.addEventListener('click', () => {
-    if (!sending) startQwen();
+    if (!ws) startQwen();
     else stopQwen();
   });
 

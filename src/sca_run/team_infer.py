@@ -106,40 +106,59 @@ class TeamInferenceSession:
 
     def __init__(self, cfg: AppConfig):
         self.cfg = cfg
+        self.model = None
+        self.tokenizer = None
+        self.processor = None
+        self.engine = None
+        self.started = False
+    
+    async def initialize(self):
+        """Async initialization to prevent blocking the server event loop."""
+        import asyncio
+        loop = asyncio.get_running_loop()
         
-        # 모델/토크나이저/프로세서 준비
-        with _model_lock:
-            self.model, self.tokenizer = _load_qwen_model_and_tokenizer(cfg)
-            
-            # [Added] Processor 로드 (Strict Verification)
+        log("info", "[Team Inference] Starting async model loading...")
+
+        # 1. Load Model & Tokenizer (Thread-safe, non-blocking for asyncio)
+        def _load_mt():
+            with _model_lock:
+                return _load_qwen_model_and_tokenizer(self.cfg)
+        
+        self.model, self.tokenizer = await loop.run_in_executor(None, _load_mt)
+
+        # 2. Load Processor
+        def _load_proc():
             from transformers import Qwen3OmniMoeProcessor
-            self.processor = Qwen3OmniMoeProcessor.from_pretrained(
+            # Use local path if possible or download
+            return Qwen3OmniMoeProcessor.from_pretrained(
                 self.model.config._name_or_path, 
                 trust_remote_code=True
             )
+        
+        if self.processor is None:
+            self.processor = await loop.run_in_executor(None, _load_proc)
             log("info", "[Team Inference] ✅ Processor 로드 완료!")
 
-        # 엔진 초기화
+        # 3. Engine 초기화
         if not TEAM_CODE_AVAILABLE:
             raise RuntimeError("src.inference not available")
 
-        # Config 설정
         self.engine_config = EngineConfig(
-            system_prompt_text=cfg.qwen.system_prompt
+            system_prompt_text=self.cfg.qwen.system_prompt
         )
         
-        # 엔진 인스턴스 생성
         self.engine = Qwen3OmniFullDuplexEngine(
             model=self.model,
             tokenizer=self.tokenizer,
             config=self.engine_config
         )
-        
-        self.started = False
         log("info", "[Team Inference] New engine session created.")
 
     async def start(self):
         """Start the inference engine."""
+        if self.engine is None:
+             await self.initialize()
+
         if not self.started:
             await self.engine.start()
             self.started = True
