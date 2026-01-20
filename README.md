@@ -1,5 +1,7 @@
 # sca_run
 
+ssh -L 8080:localhost:8080 root@38.128.232.57 -p 19542 -i ~/.ssh/id_ed25519
+
 Minimal scaffold for **streaming audio -> features -> Qwen3-Omni (Transformers) -> text**.
 
 Team request addressed:
