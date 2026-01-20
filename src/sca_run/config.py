@@ -72,8 +72,8 @@ class QwenConfig:
 
     # Qwen3-Omni settings
     model_id: str = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
-    device_map: str = "0"
-    torch_dtype: str = "auto"
+    device_map: str = "cuda:0"
+    torch_dtype: str = "bfloat16"
     
     # System Prompt for the model
     system_prompt: str = (
@@ -83,7 +83,7 @@ class QwenConfig:
     )
 
     # Optional: Advanced settings
-    attn_implementation: str | None = None
+    attn_implementation: str | None = "flash_attention_2"
     max_new_tokens: int = 0
 
 
