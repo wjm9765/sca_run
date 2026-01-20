@@ -66,7 +66,7 @@ class Qwen3DuplexLogic:
             self.audio_dtype = model.dtype
         
         # talker predictor compile to imporve speed
-        self.compiled_predictor = torch_compile_lazy(self.model.talker.code_predictor.model)    @torch.no_grad()
+        self.compiled_predictor = torch_compile_lazy(self.model.talker.code_predictor.model)   
     
     @torch.no_grad()
     def thinker_step(self, input_ids, input_features, feature_attention_mask, past_key_values, fixed_audio_tokens=4):
