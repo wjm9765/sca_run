@@ -17,6 +17,10 @@ def _env(key: str, default):
 
 @dataclass
 class AudioConfig:
+    """Audio chunking parameters.
+
+    Team request: remove hardcoded "12.5Hz / 4 frames" and make it configurable.
+    """
 
     # Incoming PCM sample rate (Hz)
     sample_rate: int = 16000
@@ -52,31 +56,29 @@ class AudioConfig:
 class QwenConfig:
     """Qwen3-Omni inference settings.
 
-    This project now targets the "transformers" backend (no vLLM-Omni).
+    This scaffold runs a lightweight UI server that:
+      - receives PCM over WebSocket
+      - extracts log-mel features on CPU
+      - calls the team's inference backend (GPU) via `sca_run/team_infer.py`
 
-    NOTE: Qwen3-Omni multimodal audio input typically requires ffmpeg
-    (used inside qwen-omni-utils).
+    So by default we do **not** load any HuggingFace models here.
     """
 
-    backend: str = "transformers"  # only supported value in this scaffold
+    backend: str = "team"  # expected value in this scaffold
 
-    # Hugging Face model id or local directory
-    model_id: str = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
-
-    # Transformers performance knobs
-    device_map: str = "auto"  # e.g. "auto" or "cuda:0"
-    torch_dtype: str = "auto"  # "auto" | "float16" | "bfloat16" | "float32"
-    attn_implementation: str | None = "flash_attention_2"
-
-    # Generation length per request
-    max_new_tokens: int = 256
-
-    # Optional: attach a constant system prompt for the thinker
-    system_prompt: str = "You are a helpful assistant."
+    # Reserved (for future use). Kept to avoid breaking older configs.
+    model_id: str = ""
+    device_map: str = ""
+    torch_dtype: str = ""
+    attn_implementation: str | None = None
+    max_new_tokens: int = 0
+    system_prompt: str = ""
 
 
 @dataclass
 class AppConfig:
+    # NOTE: dataclass fields must not use mutable instances as defaults.
+    # Use default_factory so each AppConfig gets its own config objects.
     audio: AudioConfig = field(default_factory=AudioConfig)
     qwen: QwenConfig = field(default_factory=QwenConfig)
 
@@ -109,25 +111,16 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         sample_width_bytes=int(_env("SCA_SAMPLE_WIDTH_BYTES", audio_t.get("sample_width_bytes", 2))),
     )
 
+    # Qwen config is kept mainly for compatibility; inference is provided by the
+    # team backend configured via env vars (see config/default.toml).
     qwen = QwenConfig(
-        backend=str(_env("SCA_QWEN_BACKEND", qwen_t.get("backend", "transformers"))),
-        model_id=str(_env("SCA_QWEN_MODEL_ID", qwen_t.get("model_id", "Qwen/Qwen3-Omni-30B-A3B-Instruct"))),
-        device_map=str(_env("SCA_QWEN_DEVICE_MAP", qwen_t.get("device_map", "auto"))),
-        torch_dtype=str(_env("SCA_QWEN_TORCH_DTYPE", qwen_t.get("torch_dtype", "auto"))),
-        attn_implementation=str(
-            _env(
-                "SCA_QWEN_ATTN_IMPL",
-                qwen_t.get("attn_implementation", "flash_attention_2"),
-            )
-        )
-        or None,
-        max_new_tokens=int(_env("SCA_QWEN_MAX_NEW_TOKENS", qwen_t.get("max_new_tokens", 256))),
-        system_prompt=str(
-            _env(
-                "SCA_QWEN_SYSTEM_PROMPT",
-                qwen_t.get("system_prompt", "You are a helpful assistant."),
-            )
-        ),
+        backend=str(_env("SCA_QWEN_BACKEND", qwen_t.get("backend", "team"))),
+        model_id=str(_env("SCA_QWEN_MODEL_ID", qwen_t.get("model_id", ""))),
+        device_map=str(_env("SCA_QWEN_DEVICE_MAP", qwen_t.get("device_map", ""))),
+        torch_dtype=str(_env("SCA_QWEN_TORCH_DTYPE", qwen_t.get("torch_dtype", ""))),
+        attn_implementation=str(_env("SCA_QWEN_ATTN_IMPL", qwen_t.get("attn_implementation", ""))) or None,
+        max_new_tokens=int(_env("SCA_QWEN_MAX_NEW_TOKENS", qwen_t.get("max_new_tokens", 0))),
+        system_prompt=str(_env("SCA_QWEN_SYSTEM_PROMPT", qwen_t.get("system_prompt", ""))),
     )
 
     return AppConfig(audio=audio, qwen=qwen)
