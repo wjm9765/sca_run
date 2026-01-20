@@ -237,19 +237,43 @@ class Qwen3DuplexLogic:
     @torch.no_grad()
     def decode_audio(self, audio_codes: torch.Tensor) -> np.ndarray:
         target_device = self.code2wav_device
+        
+        # 1. Device 이동
         if audio_codes.device != target_device:
             audio_codes = audio_codes.to(target_device)
+        
+        # 2. Shape 조정 (unsqueeze)
         if audio_codes.dim() == 2: 
             audio_codes = audio_codes.unsqueeze(-1)
             
-        if not audio_codes.is_contiguous():
-            audio_codes = audio_codes.contiguous()
-            
-        # ★ 컴파일된 함수 호출 (첫 실행 시 컴파일 오버헤드 있음)
-        wav_tensor = self.decode_audio_compiled(audio_codes)
+        # ---------------------------------------------------------------------
+        # [DEBUG] 컴파일 함수 진입 전 텐서 상태 정밀 진단
+        # ---------------------------------------------------------------------
+        print(f"\n[DEBUG] decode_audio Check:")
+        print(f"  - Shape: {audio_codes.shape}")
+        print(f"  - Stride: {audio_codes.stride()}")
+        print(f"  - Is Contiguous: {audio_codes.is_contiguous()}")
+        print(f"  - Memory Address: {audio_codes.data_ptr()}")
         
-        wav_cpu = wav_tensor.to("cpu", non_blocking=True).float().numpy()
-        return wav_cpu
+        # 3. 강제 재할당 (Fix 시도)
+        # .contiguous() 대신 .clone()을 사용하여 물리적으로 새 메모리에 복사
+        # 이것이 가장 확실하게 Stride 문제를 해결하는 방법입니다.
+        audio_codes = audio_codes.clone()  
+        
+        print(f"  - (After Clone) Stride: {audio_codes.stride()}")
+        # ---------------------------------------------------------------------
+
+        try:
+            # ★ 컴파일된 함수 호출
+            wav_tensor = self.decode_audio_compiled(audio_codes)
+            
+            wav_cpu = wav_tensor.to("cpu", non_blocking=True).float().numpy()
+            return wav_cpu
+            
+        except RuntimeError as e:
+            print(f"\n[CRITICAL ERROR] Compile Execution Failed!")
+            print(f"Input Tensor Info causing crash: Shape={audio_codes.shape}, Stride={audio_codes.stride()}")
+            raise e
 
 # =============================================================================
 # 3. 엔진 클래스 (Asyncio + Executor)
