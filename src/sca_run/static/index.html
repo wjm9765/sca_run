@@ -17,7 +17,6 @@
   <div>
     <button id="runBtn">Start Qwen</button>
     <button id="micBtn" disabled>Mic ON</button>
-    <button id="spkBtn" disabled>Speaker OFF</button>
   </div>
   <div id="status" class="small">Idle. Click 'Start Qwen' to initialize model.</div>
   <div id="log" class="small"></div>
@@ -26,7 +25,6 @@
 (() => {
   const micBtn = document.getElementById('micBtn');
   const runBtn = document.getElementById('runBtn');
-  const spkBtn = document.getElementById('spkBtn');
   const statusEl = document.getElementById('status');
   const logEl = document.getElementById('log');
 
@@ -39,7 +37,9 @@
   let ws = null;
   let sending = false;
   let micOn = false;
-  let speakerOn = false;
+  
+  // Speaker is always ON by default
+  let speakerOn = true;
 
   let playCtx = null;
   let pendingAudioMeta = null;

@@ -171,11 +171,7 @@ async def ws_pcm16(websocket: WebSocket):
                 if not data:
                     continue
                 
-                # log("debug", f"WS Received {len(data)} bytes") # 상세 디버깅용
-
                 for chunk in chunker.feed(data):
-                    log("info", f"[Input Loop] Chunk Generated: {len(chunk)} bytes. Converting to AudioInput...")
-                    
                     # [Strict Verification] Pass RAW PCM -> Float Mono Waveform
                     # Do NOT run log_mel_spectrogram here. Let team_infer use Processor.
                     # reusing extract... but effectively using the Waveform path
@@ -192,7 +188,6 @@ async def ws_pcm16(websocket: WebSocket):
                     # Log message removed to prevent flooding terminal (e.g. print error in loop)
                     # Instead queue it
                     await input_queue.put(audio_in)
-                    log("info", "[Input Loop] AudioInput queued.")
                         
         except WebSocketDisconnect:
             log("info", "WS Disconnected (Input Loop)")
@@ -210,11 +205,9 @@ async def ws_pcm16(websocket: WebSocket):
             while True:
                 # Wait for next audio chunk from input_queue
                 audio_in = await input_queue.get()
-                log("info", "[Push Loop] Got item from queue. Pushing to session...")
                 
                 # Push to engine asynchronously
                 await session.push_input(audio_in)
-                log("info", "[Push Loop] Pushed to session successfully.")
                 
                 input_queue.task_done()
                 
