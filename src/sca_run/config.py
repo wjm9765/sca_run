@@ -29,7 +29,8 @@ class AudioConfig:
     frame_hz: float = 12.5
 
     # How many frames to batch per inference call.
-    frames_per_chunk: int = 4
+    # run_test.py uses 0.64s (8 frames at 12.5Hz)
+    frames_per_chunk: int = 8 
 
     # Audio format for PCM streaming
     channels: int = 1
@@ -66,13 +67,21 @@ class QwenConfig:
 
     backend: str = "team"  # expected value in this scaffold
 
-    # Reserved (for future use). Kept to avoid breaking older configs.
-    model_id: str = ""
-    device_map: str = ""
-    torch_dtype: str = ""
+    # Qwen3-Omni settings
+    model_id: str = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
+    device_map: str = "0"
+    torch_dtype: str = "auto"
+    
+    # System Prompt for the model
+    system_prompt: str = (
+        "<|im_start|>system\n"
+        "You are a funny comedian performing a stand-up comedy show using Qwen3-Omni.\n"
+        "<|im_end|>\n"
+    )
+
+    # Optional: Advanced settings
     attn_implementation: str | None = None
     max_new_tokens: int = 0
-    system_prompt: str = ""
 
 
 @dataclass
@@ -115,12 +124,16 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     # team backend configured via env vars (see config/default.toml).
     qwen = QwenConfig(
         backend=str(_env("SCA_QWEN_BACKEND", qwen_t.get("backend", "team"))),
-        model_id=str(_env("SCA_QWEN_MODEL_ID", qwen_t.get("model_id", ""))),
-        device_map=str(_env("SCA_QWEN_DEVICE_MAP", qwen_t.get("device_map", ""))),
-        torch_dtype=str(_env("SCA_QWEN_TORCH_DTYPE", qwen_t.get("torch_dtype", ""))),
+        model_id=str(_env("SCA_QWEN_MODEL_ID", qwen_t.get("model_id", "Qwen/Qwen3-Omni-30B-A3B-Instruct"))),
+        device_map=str(_env("SCA_QWEN_DEVICE_MAP", qwen_t.get("device_map", "auto"))),
+        torch_dtype=str(_env("SCA_QWEN_TORCH_DTYPE", qwen_t.get("torch_dtype", "auto"))),
         attn_implementation=str(_env("SCA_QWEN_ATTN_IMPL", qwen_t.get("attn_implementation", ""))) or None,
         max_new_tokens=int(_env("SCA_QWEN_MAX_NEW_TOKENS", qwen_t.get("max_new_tokens", 0))),
-        system_prompt=str(_env("SCA_QWEN_SYSTEM_PROMPT", qwen_t.get("system_prompt", ""))),
+        system_prompt=str(_env("SCA_QWEN_SYSTEM_PROMPT", qwen_t.get("system_prompt", ""))) or (
+            "<|im_start|>system\n"
+            "You are a helpful AI assistant using Qwen3-Omni.\n"
+            "<|im_end|>\n"
+        ),
     )
 
     return AppConfig(audio=audio, qwen=qwen)

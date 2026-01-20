@@ -6,5 +6,5 @@ set -euo pipefail
 #   pip install -r requirements.txt
 #   ./run_demo_server.sh
 
-export PYTHONPATH="$(pwd)"
-uvicorn sca_run.demo_server:app --host 0.0.0.0 --port 8080
+export PYTHONPATH="src"
+uv run uvicorn sca_run.demo_server:app --host 0.0.0.0 --port 8080
