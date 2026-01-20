@@ -1,19 +1,19 @@
 from __future__ import annotations
 
-"""Team inference integration point - Qwen3-Omni FullDuplex 결합 버전.
+"""Team inference integration point - Qwen3-Omni FullDuplex version.
 
-이 모듈은 다음을 수행합니다:
-  1. feature_extractor.py가 생성한 Log-Mel Spectrogram [1, 128, T]을 받음
-  2. 팀원의 Qwen3DuplexLogic(src/inference.py)에 전달
-  3. Thinker(이해) → Talker(대답) → Code2Wav(음성 생성) 처리
-  4. 생성된 음성을 TeamAudioReturn으로 반환
+This module performs the following:
+  1. Receives Log-Mel Spectrogram or Raw Audio from the server/client logic.
+  2. Passes it to Qwen3DuplexLogic (src/inference.py).
+  3. Handles Thinker (Understand) → Talker (Reply) → Code2Wav (Audio Generation) flow.
+  4. Returns the generated audio as TeamAudioReturn.
 
-데이터 흐름:
-  PCM16 음성 → feature_extractor → Log-Mel [1,128,T]
-           → team_infer.py (이 파일)
+Data Flow:
+  PCM16 Audio → feature_extractor → Log-Mel [1,128,T] or Raw Audio [T]
+           → team_infer.py (this file)
            → Qwen3DuplexLogic
-           → 음성 생성 [T]
-           → WebSocket으로 클라이언트에 전달
+           → Generated Audio [T]
+           → Transmitted to Client via WebSocket
 """
 
 import os
@@ -29,14 +29,14 @@ from utils.client_utils import log
 from .config import AppConfig
 from .io_types import AudioInput, TeamAudioReturn
 
-# 팀원의 코드 임포트
+# Import team member's code
 try:
-    # Qwen3OmniFullDuplexEngine은 유저가 작성한 Engine 클래스 (run_test.py 참조)
+    # Qwen3OmniFullDuplexEngine is the Engine class written by the user (see run_test.py)
     from inference import Qwen3OmniFullDuplexEngine, EngineConfig
     TEAM_CODE_AVAILABLE = True
 except ImportError:
     TEAM_CODE_AVAILABLE = False
-    log("warning", "[Warning] 팀원의 inference.py를 찾을 수 없습니다. src/inference.py 경로를 확인하세요.")
+    log("warning", "[Warning] Could not find team's inference.py. Check src/inference.py path.")
 
 
 def _env(key: str, default: str = "") -> str:
@@ -45,7 +45,7 @@ def _env(key: str, default: str = "") -> str:
 
 
 # ============================================================================
-# 전역 상태 관리
+# Global State Management
 # ============================================================================
 
 _model_lock = threading.Lock()
@@ -53,13 +53,13 @@ _qwen_model = None
 _qwen_tokenizer = None
 
 def _load_qwen_model_and_tokenizer(cfg: AppConfig):
-    """팀원의 파인튜닝된 Qwen3-Omni 모델과 토크나이저를 로드합니다."""
+    """Loads the fine-tuned Qwen3-Omni model and tokenizer."""
     global _qwen_model, _qwen_tokenizer
     
     if _qwen_model is not None and _qwen_tokenizer is not None:
         return _qwen_model, _qwen_tokenizer
     
-    log("info", "[Team Inference] 🔄 Qwen3-Omni 모델 로딩 중...")
+    log("info", "[Team Inference] 🔄 Loading Qwen3-Omni model...")
     
     try:
         from transformers import AutoTokenizer, Qwen3OmniMoeForConditionalGeneration
@@ -75,7 +75,7 @@ def _load_qwen_model_and_tokenizer(cfg: AppConfig):
         if attn_impl:
             log("info", f"[Team Inference] Attention Implementation: {attn_impl}")
         
-        # 모델 로드 (Qwen3OmniMoeForConditionalGeneration 사용)
+        # Load Model (using Qwen3OmniMoeForConditionalGeneration)
         _qwen_model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
             model_id,
             device_map=device_map,
@@ -83,17 +83,17 @@ def _load_qwen_model_and_tokenizer(cfg: AppConfig):
             trust_remote_code=True,
             attn_implementation=attn_impl,
         )
-        # 토크나이저 로드
+        # Load Tokenizer
         _qwen_tokenizer = AutoTokenizer.from_pretrained(
             model_id,
             trust_remote_code=True
         )
 
-        log("info", "[Team Inference] ✅ 모델 & 토크나이저 로드 완료!")
+        log("info", "[Team Inference] ✅ Model & Tokenizer loaded!")
         return _qwen_model, _qwen_tokenizer
     
     except Exception as e:
-        log("error", f"[Team Inference] ❌ 모델/토크나이저 로드 실패: {e}")
+        log("error", f"[Team Inference] ❌ Model/Tokenizer Load Failed: {e}")
         raise
 
 
@@ -137,9 +137,9 @@ class TeamInferenceSession:
         
         if self.processor is None:
             self.processor = await loop.run_in_executor(None, _load_proc)
-            log("info", "[Team Inference] ✅ Processor 로드 완료!")
+            log("info", "[Team Inference] ✅ Processor Loaded!")
 
-        # 3. Engine 초기화
+        # 3. Engine Initialization
         if not TEAM_CODE_AVAILABLE:
             raise RuntimeError("src.inference not available")
 
@@ -180,24 +180,21 @@ class TeamInferenceSession:
         Push audio to the engine.
         
         [Strict Verification Updated]
-        run_test.py와 동일하게 Processor를 사용하여 Feature Extraction 수행.
-        audio_in.features는 이제 Raw Float Tensor (1D) 또는 기존 Features (2D)일 수 있음.
+        Performs Feature Extraction using Processor, consistent with run_test.py.
+        audio_in.features can be Raw Float Tensor (1D) or existing Features (2D).
         """
         if not self.started:
             return
 
-        # 1. 입력 데이터 확인
+        # 1. Check Input Data
         data = audio_in.features
         target_device = self.model.device
         target_dtype = self.model.dtype
 
-        # 2. Raw Float Audio인 경우 (Dimension Check)
-        # [1, T] or [T] -> Raw Waveform
-        # [1, 128, T] -> Pre-computed Mel (기존 방식)
-        
+     
         is_raw_audio = False
         if isinstance(data, torch.Tensor):
-            # 1D tensor는 무조건 Raw Audio, 2D인 경우 128(Mel)이 아니면 Raw Audio
+            # 1D tensor is always Raw Audio, 2D if not 128(Mel) is Raw Audio
             if data.dim() < 2 or (data.dim() == 2 and data.shape[-2] != 128): 
                 is_raw_audio = True
         elif isinstance(data, np.ndarray):
@@ -205,8 +202,6 @@ class TeamInferenceSession:
                 is_raw_audio = True
 
         if is_raw_audio:
-            # run_test.py 로직 적용
-            # chunk = numpy array
             if isinstance(data, torch.Tensor):
                 chunk = data.detach().cpu().numpy().squeeze()
             else:
@@ -234,9 +229,9 @@ class TeamInferenceSession:
             await self.engine.push_audio(input_features)
             
         else:
-            # 기존 Pre-computed Feature 경로 (Feature Extractor 사용 시)
-            # 만약 server.py가 여전히 qwen_client의 log_mel_spectrogram을 쓴다면 이리로 옴.
-            # 하지만 run_test.py와 맞추려면 Raw로 보내는게 맞음.
+            # Legacy Pre-computed Feature path (if Feature Extractor used externally)
+            # If server.py still uses qwen_client's log_mel_spectrogram, it lands here.
+            # But to match run_test.py, Raw should be sent.
             if not isinstance(data, torch.Tensor):
                 features = torch.from_numpy(data)
             else:
@@ -261,7 +256,7 @@ class TeamInferenceSession:
             wav_int16 = np.frombuffer(out_bytes, dtype=np.int16)
             wav_float = wav_int16.astype(np.float32) / 32768.0
             
-            # 엔진 출력 샘플레이트는 Qwen3 Omni 기본값인 24000Hz로 가정
+            # Engine output sample rate assumed to be 24000Hz (Qwen3 Omni default)
             return TeamAudioReturn(
                 wav=wav_float,
                 sample_rate=24000,
@@ -279,30 +274,29 @@ class TeamInferenceSession:
 def infer_team_wav(cfg: AppConfig, audio_in: AudioInput) -> Optional[TeamAudioReturn]:
 
     """
-    팀원의 Qwen3-Omni FullDuplex 모델로 추론합니다.
+    Inference using Qwen3-Omni FullDuplex model.
     
-    입력:
-        cfg: AppConfig (설정)
+    Input:
+        cfg: AppConfig
         audio_in: AudioInput (Log-Mel features [1, 128, T])
     
-    출력:
+    Output:
         TeamAudioReturn (wav float32, sample_rate=24000)
     """
     
     if not TEAM_CODE_AVAILABLE:
-        print("[Team Inference] ⚠️ 팀원의 inference.py를 찾을 수 없습니다.")
+        print("[Team Inference] ⚠️ Cannot find team's inference.py.")
         return None
     
     try:
         global _duplex_logic, _step_count
         
-        # 1. Duplex Logic 초기화 (처음 한 번만)
+        # 1. Initialize Duplex Logic (Once)
         logic = _init_duplex_logic(cfg)
         
-        # 2. 입력 데이터 준비
+        # 2. Prepare Input Data
         features = audio_in.features
         
-        # CPU에 있으면 유지, GPU에 있으면 그대로
         if isinstance(features, torch.Tensor):
             features = features.float()
         else:
@@ -310,7 +304,6 @@ def infer_team_wav(cfg: AppConfig, audio_in: AudioInput) -> Optional[TeamAudioRe
         
         print(f"[Team Inference] 입력 Feature 형태: {features.shape}")
         
-        # 3. Thinker 단계: 오디오 이해하기
         print("[Team Inference] 🧠 Thinker 처리 중...")
         
         # Feature Attention Mask 생성
@@ -374,16 +367,15 @@ def infer_team_wav(cfg: AppConfig, audio_in: AudioInput) -> Optional[TeamAudioRe
     
     except Exception as e:
         import traceback
-        print(f"[Team Inference] ❌ 추론 실패: {e}")
+        print(f"[Team Inference] 추론 실패: {e}")
         traceback.print_exc()
         return None
 
 
 def reset_conversation():
-    """대화 상태를 초기화합니다 (새로운 대화 시작)."""
     global _duplex_logic, _step_count
     
     with _model_lock:
         _duplex_logic = None
         _step_count = 0
-        print("[Team Inference] 🔄 대화 상태 초기화됨")
+        print("[Team Inference]  대화 상태 초기화됨")

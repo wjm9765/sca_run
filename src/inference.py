@@ -9,8 +9,6 @@ try:
     from .utils.compile import torch_compile_lazy
 except ImportError:
     def log(level, msg): print(f"[{level.upper()}] {msg}")
-    
-    # [Fix] Import 실패 시 fallback 정의
     def torch_compile_lazy(model):
         return torch.compile(model)
 
@@ -19,12 +17,8 @@ os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 torch.set_num_threads(1)
 
-# =============================================================================
-# 1. 설정 및 데이터 클래스
-# =============================================================================
 @dataclass
 class EngineConfig:
-    # ★ [오디오 고정 길이 설정] 0.32초 = 4토큰 (Qwen3-Omni 구조적 특성)
     audio_input_tokens: int = 8   
     text_output_tokens: int = 4   
     audio_output_tokens: int = 8
@@ -37,9 +31,6 @@ class EngineConfig:
         "<|im_end|>\n"
     )
 
-# =============================================================================
-# 2. 로직 클래스 (Stateless Tensor Operations)
-# =============================================================================
 class Qwen3DuplexLogic:
     def __init__(self, model):
         self.model = model
@@ -69,7 +60,7 @@ class Qwen3DuplexLogic:
         except:
             self.audio_dtype = model.dtype
         
-        # talker predictor compile to imporve speed
+        # talker predictor compile to improve speed
         self.compiled_predictor = torch_compile_lazy(self.model.talker.code_predictor.model) 
     
     @torch.no_grad()
@@ -82,15 +73,11 @@ class Qwen3DuplexLogic:
         target_device = self.thinker_device
         
         try:
-            # -----------------------------------------------------------------
-            # Case 1: Audio Input Processing
-            # -----------------------------------------------------------------
             if input_features is not None:
                 if input_features.device != target_device:
                     input_features = input_features.to(target_device)
                 input_features = input_features.to(dtype=self.audio_dtype)
 
-                # [Mask 자동 생성] NoneType 에러 방지
                 if feature_attention_mask is None:
                     # shape: [Batch, Mel, Time]
                     feature_attention_mask = torch.ones(
@@ -102,10 +89,8 @@ class Qwen3DuplexLogic:
                     if feature_attention_mask.device != target_device:
                         feature_attention_mask = feature_attention_mask.to(target_device)
 
-                # [Input IDs 생성] "오디오는 항상 4토큰" (Config 사용)
                 audio_token_id = self.model.config.thinker_config.audio_token_id
                 
-                # [Batch=1, Length=4]
                 input_ids = torch.full(
                     (1, fixed_audio_tokens), 
                     audio_token_id, 
@@ -113,13 +98,8 @@ class Qwen3DuplexLogic:
                     device=target_device
                 )
                 
-                # ★ 핵심: inputs_embeds를 직접 계산하지 않고 None으로 둠.
-                # 대신 input_features를 forward에 전달하여 모델이 내부적으로 처리하게 함.
                 inputs_embeds = None 
 
-            # -----------------------------------------------------------------
-            # Case 2: Text Input Processing
-            # -----------------------------------------------------------------
             elif input_ids is not None:
                 if input_ids.device != target_device:
                     input_ids = input_ids.to(target_device)
@@ -131,12 +111,6 @@ class Qwen3DuplexLogic:
             else:
                 raise ValueError("ThinkerStep: Both input_ids and input_features are None")
 
-            # -----------------------------------------------------------------
-            # Forward (Model Internal Logic)
-            # -----------------------------------------------------------------
-            # position_ids와 rope_deltas를 전달하지 않음 -> 모델이 내부에서 past_key_values 길이를 보고 자동 계산
-            # input_features를 전달함 -> 모델이 내부에서 get_audio_features -> Projection 수행 (차원 불일치 해결)
-            
             return self.model.thinker(
                 input_ids=input_ids,
                 input_features=input_features,       # 오디오 원본 전달 (내부 처리 유도)
@@ -230,15 +204,10 @@ class Qwen3DuplexLogic:
         if audio_codes.dim() == 2: 
             audio_codes = audio_codes.unsqueeze(-1)
         
-        # 모델 직접 호출 (컴파일 없이 실행하여 안정성 확보)
         wav_tensor = self.model.code2wav(audio_codes)
         
-        # CPU 이동 및 Numpy 변환
         return wav_tensor.to("cpu", non_blocking=True).float().numpy()
 
-# =============================================================================
-# 3. 엔진 클래스 (Asyncio + Executor)
-# =============================================================================
 class Qwen3OmniFullDuplexEngine:
     def __init__(self, model, tokenizer, config: EngineConfig):
         self.model = model
@@ -273,9 +242,7 @@ class Qwen3OmniFullDuplexEngine:
         codec_bos = self.model.config.talker_config.codec_bos_id
         self.last_talker_token = torch.tensor([[codec_bos]], device=self.logic.talker_device)
 
-        # Prefill
         with torch.no_grad():
-            # step_idx 제거
             out = self.logic.thinker_step(
                 input_ids=initial_ids, 
                 input_features=None, 
@@ -283,7 +250,6 @@ class Qwen3OmniFullDuplexEngine:
                 past_key_values=None
             )
             self.thinker_kv_cache = out.past_key_values
-            #compile / 나중에 안하는 decode_audio 부분 삭제
             
             log("info", "   ... Compiling Talker Inner Loop (Wait a moment)")
             # 2. Talker Compile Trigger
@@ -302,7 +268,6 @@ class Qwen3OmniFullDuplexEngine:
                 audio_features = await self.input_queue.get()
                 # log("info", "[Thinker] Processing...")
 
-                # --- [Step 1] Listening (오디오 인코딩) ---
                 def listen_and_predict_first():
                     with torch.no_grad():
                         out = self.logic.thinker_step(
@@ -316,15 +281,13 @@ class Qwen3OmniFullDuplexEngine:
                 
                 tok_id = curr_token.item()
                 if tok_id == self.cfg.silence_token_id:
-                    # log("info", "[Thinker] Silence.")
+                    log("info", "[Thinker] Silence.")
                     continue
                 
                 # 예측된 토큰 출력 (간결화)
                 decoded_text = self.tokenizer.decode([tok_id], skip_special_tokens=True)
                 log("info", f">> {decoded_text}")
 
-                # --- [Step 2] Streaming Loop (1개 만들자마자 전송) ---
-                # ★ 여기가 핵심: executor를 루프 안에서 돌려서, 1개 생성 후 즉시 큐에 넣음
                 for i in range(self.cfg.text_output_tokens):
                     
                     def generate_one_token(token_in, kv_in):
@@ -343,13 +306,11 @@ class Qwen3OmniFullDuplexEngine:
                         None, generate_one_token, curr_token, self.thinker_kv_cache
                     )
 
-                    # ★ 기다리지 않고 즉시 Talker Queue로 전송
                     if not hidden_chunk.is_contiguous():
                         hidden_chunk = hidden_chunk.contiguous()
                     await self.hidden_queue.put(hidden_chunk)
                     
-                    # 배포용 최적화: 중간 전송 로그 제거
-
+                    
             except Exception as e:
                 log("error", f"Thinker Error: {e}")
 
@@ -358,7 +319,6 @@ class Qwen3OmniFullDuplexEngine:
         
         while self.is_running:
             try:
-                # ★ 1개씩 받음 (배치 아님, shape: [1, 1, 4096])
                 source_hidden = await self.hidden_queue.get()
                 # log("info", "[Talker] Received hidden state.")
                 
@@ -368,7 +328,6 @@ class Qwen3OmniFullDuplexEngine:
                         ratio = self.cfg.audio_output_tokens // self.cfg.text_output_tokens
                         output_chunks = []
 
-                        # 이제 source_hidden은 무조건 1개이므로 바깥 루프 삭제하고 바로 ratio만큼 실행
                         for _ in range(ratio):
                             codes, new_kv = self.logic.talker_step(
                                 thinker_hidden=hidden_state,

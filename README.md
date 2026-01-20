@@ -1,103 +1,93 @@
-# sca_run
+# Qwen3-Omni Full Duplex Runner
 
-ssh -L 8080:localhost:8080 root@38.128.232.57 -p 19542 -i ~/.ssh/id_ed25519
+This repository contains the runner code for the **Qwen3-Omni** model fine-tuned for **Full Duplex** interaction. It allows for real-time voice conversations where the model listens and speaks simultaneously, enabling a fluid conversational experience.
 
-Minimal scaffold for **streaming audio -> features -> Qwen3-Omni (Transformers) -> text**.
+## Training & Data Preparation
 
-Team request addressed:
-- remove hardcoded `12.5Hz / 4` audio splitting
-- make audio chunking configurable (TOML + env overrides)
+- **Data Preparation**: [sca_data_prep](https://github.com/riverfog7/sca_data_prep) - Refer to this repository for preparing the dataset.
+- **Training**: [SCA](https://github.com/wjm9765/SCA) - Refer to this repository for the code used to train the model.
 
-Architecture note:
-- The server can precompute audio features (mel-style `input_features`) and pass
-  them into the inference step via `AudioInput`. This makes it easy to plug in a
-  separate "thinker/talker" module that expects features instead of raw audio.
+##  Features
 
-## 1) Config
+- **Full Duplex Interaction**: Supports simultaneous listening and speaking functionality (interruptibility).
+- **Streaming Pipeline**: Handles real-time audio streaming via WebSocket.
+- **Modular Architecture**: Separates server logic, feature extraction, and model inference.
+- **Easy Deployment**: Simple command-line interface for running the inference server.
 
-Edit: `config/default.toml`
+## Configuration
 
-Key knobs:
-- `audio.frame_hz` (default `12.5`)  
-  - 12.5Hz => 80ms per frame
-- `audio.frames_per_chunk` (default `4`)  
-  - 4 frames => 320ms per request
+The configuration is split into two main files depending on what you need to adjust:
 
-You can override without touching code:
-- `SCA_FRAME_HZ`
-- `SCA_FRAMES_PER_CHUNK`
+### 1. Model & Core Parameters (`src/sca_run/config.py`)
+Modify this file if you need to change the fundamental behavior of the model or audio specifications, such as:
+- **Audio Sample Rate**
+- **Number of tokens to predict** per step
 
-Qwen (Transformers) settings:
-- `qwen.model_id` / `SCA_QWEN_MODEL_ID`
-- `qwen.device_map` / `SCA_QWEN_DEVICE_MAP`
-- `qwen.torch_dtype` / `SCA_QWEN_TORCH_DTYPE`
-- `qwen.attn_implementation` / `SCA_QWEN_ATTN_IMPL`
-- `qwen.max_new_tokens` / `SCA_QWEN_MAX_NEW_TOKENS`
+### 2. Server & Environment (`config/default.toml`)
+Modify this file for deployment-specific settings:
+- **Model Path** (`model_id`)
+- **Server Audio Processing** (buffering, chunking)
 
-> Note: /infer_wav uses Python's built-in WAV decoder, so it supports *uncompressed* 16-bit PCM WAV. For other formats, decode on the client side first.
+### Default Values
+The system is pre-configured with the following defaults for optimal performance:
+- **Audio Input**: 8 tokens (approx. 0.64s)
+- **Text Generation**: 4 tokens
+- **Talker Prediction**: approx. 0.64s
 
-## 2) Run
+##  Getting Started
+First run uv sync --extra full,cu128 (cuda version depends on your GPU, for CPU only, use the cpu extras) to install the required dependencies.
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+### Prerequisites
+- Python 3.10+
+- CUDA-compatible GPU (Recommended for Qwen3-Omni)
+- `ffmpeg` (for audio processing)
 
-# example: local HF model id
-export SCA_QWEN_MODEL_ID="Qwen/Qwen3-Omni-30B-A3B-Instruct"
-export SCA_QWEN_DEVICE_MAP="auto"      # or "cuda:0"
-export SCA_QWEN_TORCH_DTYPE="auto"     # or "float16"
+### Installation
 
-python -m sca_run.server --config config/default.toml --host 0.0.0.0 --port 8000
-import torch
-from dataclasses import dataclass
-from typing import Optional
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/your-repo/sca_run.git
+   cd sca_run
+   ```
 
-```bash
-@dataclass
-class AudioInput:
- 
-    # 전처리된 Mel-Spectrogram Feature [1, 128, T]
-    features: torch.Tensor 
-    
-    # (선택) 디버깅용 타임스탬프 (Lag 측정용)
-    timestamp: float = 0.0
+2. Create a virtual environment and install dependencies:
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate
+   pip install -r requirements.txt
+   ```
 
-@dataclass
-class ThoughtPacket:
- 
-    # Talker의 입력이 될 Hidden States [1, Seq, Dim]
-    hidden_states: torch.Tensor
-    
-    # 예: "음...", "반갑", "습니다"
-    text_token_str: Optional[str] = None
+### Running the Server
 
-@dataclass
-class AudioOutput:
-  
-    # 스피커로 재생할 PCM Audio Bytes (Int16)
-    audio_bytes: bytes
-    
-    # (선택) 이 오디오가 어떤 텍스트에서 나왔는지 (자막용)
-    text_log: Optional[str] = None
-```
+1. **Set Model Path** (Optional, if not set in `default.toml`):
+   ```bash
+   export SCA_QWEN_MODEL_ID="/path/to/your/finetuned/model"
+   ```
 
-## 3) Endpoints
+2. **Start the Server**:
+   ```bash
+   python -m sca_run.server --config config/default.toml --host 0.0.0.0 --port 8000
+   ```
+   
+   The server will start at `http://0.0.0.0:8000`.
 
-### Health
-- `GET /health` => "ok"
+3. **Web Interface**:
+   Open a browser and navigate to `http://localhost:8000`. You can interact with the model using your microphone.
 
-### One-shot WAV inference
-- `POST /infer_wav?prompt=...` with multipart form field `file` (wav)
+##  Project Structure
 
-### Streaming PCM16 WebSocket
-- `WS /ws/pcm16`
+- `src/sca_run/`: Main source code
+  - `server.py`: FastAPI server & WebSocket handler
+  - `team_infer.py,inference.py`: Integration layer for Qwen3-Omni logic
+  - `config.py`: Configuration dataclasses
+  - `static/`: Frontend assets (Web UI)
+- `config/`: Configuration files (`default.toml`)
+- `scripts/`: Utility scripts for testing and setup
 
-Protocol:
-1) (optional) first message: **text JSON** for session overrides
-   - `{"prompt": "..."}`
-   - `{"frames_per_chunk": 6}`
-   - `{"frame_hz": 12.5}`
-2) then send **binary** messages: little-endian **mono PCM16** bytes
-3) server converts PCM -> features (AudioInput) -> inference, and replies **JSON** per chunk:
-   - `{ "text": "...", "chunk_ms": 320.0, "frames_per_chunk": 4, "frame_hz": 12.5 }`
+## Contribution
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+##  License
+
+[MIT License](LICENSE)
