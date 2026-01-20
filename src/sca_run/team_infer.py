@@ -152,7 +152,11 @@ class TeamInferenceSession:
             tokenizer=self.tokenizer,
             config=self.engine_config
         )
-        log("info", "[Team Inference] New engine session created.")
+        
+        # [User Request] Start immediately to trigger prefill/compilation
+        await self.engine.start()
+        self.started = True
+        log("info", "[Team Inference] Engine created and started (Compiled & Ready).")
 
     async def start(self):
         """Start the inference engine."""
