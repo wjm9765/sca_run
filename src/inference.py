@@ -9,6 +9,10 @@ try:
     from .utils.compile import torch_compile_lazy
 except ImportError:
     def log(level, msg): print(f"[{level.upper()}] {msg}")
+    
+    # [Fix] Import 실패 시 fallback 정의
+    def torch_compile_lazy(model):
+        return torch.compile(model)
 
 import os
 os.environ["OMP_NUM_THREADS"] = "1"

@@ -277,14 +277,10 @@ async def ws_pcm16(websocket: WebSocket):
     # -------------------------------------------------------------------------
     # Main Event Loop
     # -------------------------------------------------------------------------
-    # Start the engine first
-    await session.start()
+    # NOTE: session.start() and initialization is already done via /start_qwen
+    # We just enter the streaming loops immediately.
 
-    # Notify client that server is ready
-    await websocket.send_json({
-        "type": "server_ready",
-        "message": "Engine started. Ready to receive audio."
-    })
+    log("info", "Starting Streaming Loops...")
 
     # Run all tasks concurrently
     try:

@@ -83,7 +83,8 @@ class QwenConfig:
     )
 
     # Optional: Advanced settings
-    attn_implementation: str | None = "flash_attention_2"
+    #attn_implementation: str | None = "flash_attention_2"
+    attn_implementation: str | None = "sdpa"
     max_new_tokens: int = 0
 
 
