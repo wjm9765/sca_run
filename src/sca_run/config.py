@@ -115,29 +115,31 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     audio_t = data.get("audio", {}) if isinstance(data, dict) else {}
     qwen_t = data.get("qwen", {}) if isinstance(data, dict) else {}
 
+    # Use defaults from the dataclass definitions (config.py)
+    # This ensures that modifying the class fields directly works as expected.
+    def_audio = AudioConfig()
+    def_qwen = QwenConfig()
+
     audio = AudioConfig(
-        sample_rate=int(_env("SCA_SAMPLE_RATE", audio_t.get("sample_rate", 16000))),
-        output_sample_rate=int(_env("SCA_OUTPUT_SAMPLE_RATE", audio_t.get("output_sample_rate", 24000))),
-        frame_hz=float(_env("SCA_FRAME_HZ", audio_t.get("frame_hz", 12.5))),
-        frames_per_chunk=int(_env("SCA_FRAMES_PER_CHUNK", audio_t.get("frames_per_chunk", 4))),
-        channels=int(_env("SCA_CHANNELS", audio_t.get("channels", 1))),
-        sample_width_bytes=int(_env("SCA_SAMPLE_WIDTH_BYTES", audio_t.get("sample_width_bytes", 2))),
+        sample_rate=int(_env("SCA_SAMPLE_RATE", audio_t.get("sample_rate", def_audio.sample_rate))),
+        output_sample_rate=int(_env("SCA_OUTPUT_SAMPLE_RATE", audio_t.get("output_sample_rate", def_audio.output_sample_rate))),
+        frame_hz=float(_env("SCA_FRAME_HZ", audio_t.get("frame_hz", def_audio.frame_hz))),
+        frames_per_chunk=int(_env("SCA_FRAMES_PER_CHUNK", audio_t.get("frames_per_chunk", def_audio.frames_per_chunk))),
+        channels=int(_env("SCA_CHANNELS", audio_t.get("channels", def_audio.channels))),
+        sample_width_bytes=int(_env("SCA_SAMPLE_WIDTH_BYTES", audio_t.get("sample_width_bytes", def_audio.sample_width_bytes))),
     )
 
-    # Qwen config is kept mainly for compatibility; inference is provided by the
-    # team backend configured via env vars (see config/default.toml).
+    # For optional fields, handle None carefully
+    attn_default = def_qwen.attn_implementation if def_qwen.attn_implementation else ""
+
     qwen = QwenConfig(
-        backend=str(_env("SCA_QWEN_BACKEND", qwen_t.get("backend", "team"))),
-        model_id=str(_env("SCA_QWEN_MODEL_ID", qwen_t.get("model_id", "Qwen/Qwen3-Omni-30B-A3B-Instruct"))),
-        device_map=str(_env("SCA_QWEN_DEVICE_MAP", qwen_t.get("device_map", "auto"))),
-        torch_dtype=str(_env("SCA_QWEN_TORCH_DTYPE", qwen_t.get("torch_dtype", "auto"))),
-        attn_implementation=str(_env("SCA_QWEN_ATTN_IMPL", qwen_t.get("attn_implementation", ""))) or None,
-        max_new_tokens=int(_env("SCA_QWEN_MAX_NEW_TOKENS", qwen_t.get("max_new_tokens", 0))),
-        system_prompt=str(_env("SCA_QWEN_SYSTEM_PROMPT", qwen_t.get("system_prompt", ""))) or (
-            "<|im_start|>system\n"
-            "You are a helpful AI assistant using Qwen3-Omni.\n"
-            "<|im_end|>\n"
-        ),
+        backend=str(_env("SCA_QWEN_BACKEND", qwen_t.get("backend", def_qwen.backend))),
+        model_id=str(_env("SCA_QWEN_MODEL_ID", qwen_t.get("model_id", def_qwen.model_id))),
+        device_map=str(_env("SCA_QWEN_DEVICE_MAP", qwen_t.get("device_map", def_qwen.device_map))),
+        torch_dtype=str(_env("SCA_QWEN_TORCH_DTYPE", qwen_t.get("torch_dtype", def_qwen.torch_dtype))),
+        attn_implementation=str(_env("SCA_QWEN_ATTN_IMPL", qwen_t.get("attn_implementation", attn_default))) or None,
+        max_new_tokens=int(_env("SCA_QWEN_MAX_NEW_TOKENS", qwen_t.get("max_new_tokens", def_qwen.max_new_tokens))),
+        system_prompt=str(_env("SCA_QWEN_SYSTEM_PROMPT", qwen_t.get("system_prompt", def_qwen.system_prompt))),
     )
 
     return AppConfig(audio=audio, qwen=qwen)

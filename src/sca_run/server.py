@@ -90,6 +90,35 @@ async def infer_wav(file: UploadFile = File(...)):
     }
 
 
+
+# ----------------------------------------------------------------------------
+# Global State
+# ----------------------------------------------------------------------------
+GLOBAL_SESSION: Optional[TeamInferenceSession] = None
+GLOBAL_SESSION_LOCK = asyncio.Lock()
+
+@app.post("/start_qwen")
+async def start_qwen():
+    """Initializes the Qwen model on the server."""
+    global GLOBAL_SESSION
+    
+    async with GLOBAL_SESSION_LOCK:
+        if GLOBAL_SESSION is not None:
+             # Already initialized
+             return {"status": "ok", "message": "Model already loaded."}
+        
+        try:
+            log("info", "Initializing Global TeamInferenceSession...")
+            session = TeamInferenceSession(CFG)
+            await session.initialize()
+            GLOBAL_SESSION = session
+            log("info", "Global TeamInferenceSession initialized successfully.")
+            return {"status": "ok", "message": "Model initialized successfully."}
+        except Exception as e:
+            log("error", f"Failed to initialize model: {e}")
+            return Response(content=f"Failed to initialize model: {e}", status_code=500)
+
+
 @app.websocket("/ws/pcm16")
 async def ws_pcm16(websocket: WebSocket):
     """Full Duplex WebSocket streaming.
@@ -100,13 +129,25 @@ async def ws_pcm16(websocket: WebSocket):
     - Task 3 (Output): OutputQueue -> Send WAV -> Client
     """
     await websocket.accept()
+    
+    global GLOBAL_SESSION
+    if GLOBAL_SESSION is None:
+        log("error", "WS Connection rejected: Model not initialized. Call /start_qwen first.")
+        await websocket.close(code=4000, reason="Model not initialized")
+        return
+
     log("info", "New user connected to /ws/pcm16")
 
     session_cfg = CFG
     chunker = PCMChunker(chunk_bytes=session_cfg.audio.chunk_bytes)
     
-    # Session state
-    session = TeamInferenceSession(session_cfg)
+    # Use the global session
+    session = GLOBAL_SESSION
+    
+    # We don't call session.start() (initialize) here anymore because /start_qwen did it.
+    # However, if session needs per-connection start logic (like clearing history), 
+    # we might need a method for that. For now, assuming persistent session is fine or handled by engine.
+    
     input_queue = asyncio.Queue()  # Items: AudioInput
     output_queue = asyncio.Queue() # Items: TeamAudioReturn
     

@@ -211,107 +211,137 @@
     src.start(0);
   }
 
-  function startQwen() {
-    if (ws) return;
+  // New Function: Connect WebSocket for streaming (called when Mic is turned ON)
+  function connectWebSocket() {
+    return new Promise((resolve, reject) => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            resolve();
+            return;
+        }
 
-    ws = new WebSocket(wsUrl());
-    ws.binaryType = 'arraybuffer';
+        ws = new WebSocket(wsUrl());
+        ws.binaryType = 'arraybuffer';
 
-    ws.onopen = () => {
-      // connecting...
-      sending = false; // Wait for server_ready
-      runBtn.textContent = 'Stop Qwen';
-      // Disable Run Button temporarily? No, allow stop.
-      setStatus('Connected to Server. Initializing Qwen Model (Please wait)...');
-      log('WS connected. Waiting for engine...');
-    };
+        ws.onopen = () => {
+            log('WS connected for streaming.');
+            resolve();
+        };
 
-    ws.onmessage = (ev) => {
-      // We can receive JSON (status/meta) or binary (PCM16LE).
-      if (typeof ev.data === 'string') {
-        try {
-          const obj = JSON.parse(ev.data);
-          if (obj && typeof obj === 'object') {
-            // [Added] Check server_ready
-            if (obj.type === "server_ready") {
-                micBtn.disabled = false;
-                spkBtn.disabled = false;
-                setStatus('Model Initialized! Please click "Mic ON" to start speaking.');
-                log(`✅ ${obj.message}`);
+        ws.onmessage = (ev) => {
+             // We can receive JSON (status/meta) or binary (PCM16LE).
+            if (typeof ev.data === 'string') {
+                try {
+                const obj = JSON.parse(ev.data);
+                if (obj && typeof obj === 'object') {
+                    if (obj.type === 'talker_audio') {
+                        pendingAudioMeta = obj;
+                        if (obj.text_log) log('talker: ' + obj.text_log);
+                        return;
+                    }
+
+                    if (obj.error) {
+                        log('ERROR: ' + obj.error);
+                    } else {
+                        let line = `chunk #${obj.chunks ?? '?'} processed`;
+                        if (obj.team_audio === false) line += ' | (team audio: not configured)';
+                        log(line);
+                    }
+                } else {
+                    log(String(ev.data));
+                }
+                } catch {
+                log(String(ev.data));
+                }
                 return;
             }
 
-            if (obj.type === 'talker_audio') {
-              pendingAudioMeta = obj;
-              if (obj.text_log) log('talker: ' + obj.text_log);
-              return;
+            // Binary -> play if speaker enabled
+            if (ev.data instanceof ArrayBuffer) {
+                playPcm16le(ev.data, pendingAudioMeta);
+                pendingAudioMeta = null;
+                return;
             }
+        };
 
-            if (obj.error) {
-              log('ERROR: ' + obj.error);
-            } else {
-              let line = `chunk #${obj.chunks ?? '?'} processed`;
-              if (obj.team_audio === false) line += ' | (team audio: not configured)';
-              log(line);
+        ws.onclose = () => {
+            log('WS closed.');
+            ws = null;
+            sending = false;
+            // If mic was on, turn it off visually (although stream is dead)
+            if (micOn) {
+                 stopMic();
+                 log('Mic stopped due to connection close.');
             }
-          } else {
-            log(String(ev.data));
-          }
-        } catch {
-          log(String(ev.data));
+        };
+
+        ws.onerror = (e) => {
+            log('WS error.');
+            reject(e);
+        };
+    });
+  }
+
+  // Modified: Call HTTP API to initialize model
+  async function startQwen() {
+    runBtn.disabled = true;
+    setStatus('Initializing Qwen Model (This may take 10-20s)...');
+    
+    try {
+        const res = await fetch('/start_qwen', { method: 'POST' });
+        if (!res.ok) {
+            const txt = await res.text();
+            throw new Error(txt || res.statusText);
         }
-        return;
-      }
-
-      // Binary -> play if speaker enabled
-      if (ev.data instanceof ArrayBuffer) {
-        playPcm16le(ev.data, pendingAudioMeta);
-        pendingAudioMeta = null;
-        return;
-      }
-    };
-
-    ws.onclose = () => {
-      sending = false;
-      ws = null;
-      runBtn.textContent = 'Start Qwen';
-      micBtn.disabled = true;
-      spkBtn.disabled = true;
-      
-      // Stop mic if it was running? Or keep it? Use case seems to require mic is slave to Qwen connection usually
-      if (micOn) stopMic(); 
-      
-      setStatus('Disconnected.');
-      log('WS closed.');
-    };
-
-    ws.onerror = () => {
-      log('WS error.');
-    };
+        const data = await res.json();
+        log(`✅ ${data.message}`);
+        
+        // Success
+        setStatus('Model Ready. Click "Mic ON" to start streaming.');
+        runBtn.textContent = 'Model Ready';
+        runBtn.disabled = true; // No need to click again
+        
+        // Enable Controls
+        micBtn.disabled = false;
+        spkBtn.disabled = false;
+        
+    } catch (e) {
+        log(`❌ Initialization Failed: ${e.message}`);
+        setStatus('Initialization Failed. See log.');
+        runBtn.disabled = false; // Allow retry
+        alert(`Failed to initialize model: ${e.message}`);
+    }
   }
 
   function stopQwen() {
-    if (!ws) return;
-    try { ws.close(); } catch (e) {}
-    // cleanup handles in onclose
+     // Not used in this flow anymore properly, but good cleanup
+    if (ws) ws.close();
   }
 
   micBtn.addEventListener('click', async () => {
     try {
       if (!micOn) {
+          // Turn ON
+          if (!ws) {
+             setStatus('Connecting to Streaming Server...');
+             await connectWebSocket();
+          }
           await startMic();
       } else {
+          // Turn OFF
           await stopMic();
+          // Optional: Keep WS open? Or Close?
+          // User said "Start websocket communication from then [mic on enabled]".
+          // We'll keep it open to receive lagging audio.
       }
     } catch (e) {
       log('Mic error: ' + (e && e.message ? e.message : String(e)));
-      setStatus('Mic error.');
+      setStatus('Mic/Connection error.');
     }
   });
 
   runBtn.addEventListener('click', () => {
-    if (!ws) startQwen();
-    else stopQwen();
+     // Only for starting now
+     startQwen();
   });
 
   spkBtn.addEventListener('click', () => {
