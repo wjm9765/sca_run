@@ -197,10 +197,11 @@ class TeamInferenceSession:
         
         is_raw_audio = False
         if isinstance(data, torch.Tensor):
-            if data.dim() <= 2 and data.shape[-2] != 128: 
+            # 1D tensor는 무조건 Raw Audio, 2D인 경우 128(Mel)이 아니면 Raw Audio
+            if data.dim() < 2 or (data.dim() == 2 and data.shape[-2] != 128): 
                 is_raw_audio = True
         elif isinstance(data, np.ndarray):
-             if data.ndim <= 2 and data.shape[-2] != 128:
+             if data.ndim < 2 or (data.ndim == 2 and data.shape[-2] != 128):
                 is_raw_audio = True
 
         if is_raw_audio:
