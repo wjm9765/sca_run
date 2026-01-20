@@ -75,8 +75,9 @@ class Qwen3DuplexLogic:
         except:
             self.audio_dtype = model.dtype
 
-        # ★ [Compilation] 정적인 Code2Wav 디코더를 컴파일하여 CPU 오버헤드 제거
-        self.decode_audio_compiled = torch_compile_lazy(self._decode_audio_raw)
+        self.decode_audio_compiled = self._decode_audio_raw
+
+        self.model.talker.code_predictor.model = torch_compile_lazy(self.model.talker.code_predictor.model)
 
     @torch.no_grad()
     def thinker_step(self, input_ids, input_features, feature_attention_mask, past_key_values, fixed_audio_tokens=4):
@@ -230,50 +231,28 @@ class Qwen3DuplexLogic:
             dummy_codes = torch.randint(0, 1024, (1, self.num_quantizers), device=self.talker_device)
             return dummy_codes, past_key_values
 
-    # [Compilable Inner Function]
+
+    #두 함수 나중에 합치기
     def _decode_audio_raw(self, audio_codes):
         return self.model.code2wav(audio_codes)
 
     @torch.no_grad()
     def decode_audio(self, audio_codes: torch.Tensor) -> np.ndarray:
         target_device = self.code2wav_device
-        
-        # 1. Device 이동
         if audio_codes.device != target_device:
             audio_codes = audio_codes.to(target_device)
-        
-        # 2. Shape 조정 (unsqueeze)
         if audio_codes.dim() == 2: 
             audio_codes = audio_codes.unsqueeze(-1)
             
-        # ---------------------------------------------------------------------
-        # [DEBUG] 컴파일 함수 진입 전 텐서 상태 정밀 진단
-        # ---------------------------------------------------------------------
-        print(f"\n[DEBUG] decode_audio Check:")
-        print(f"  - Shape: {audio_codes.shape}")
-        print(f"  - Stride: {audio_codes.stride()}")
-        print(f"  - Is Contiguous: {audio_codes.is_contiguous()}")
-        print(f"  - Memory Address: {audio_codes.data_ptr()}")
+        # 컴파일을 껐으므로 clone은 필수는 아니지만, 안전장치로 둠
+        if not audio_codes.is_contiguous():
+            audio_codes = audio_codes.contiguous()
         
-        # 3. 강제 재할당 (Fix 시도)
-        # .contiguous() 대신 .clone()을 사용하여 물리적으로 새 메모리에 복사
-        # 이것이 가장 확실하게 Stride 문제를 해결하는 방법입니다.
-        audio_codes = audio_codes.clone()  
+        # 컴파일 없이 바로 실행 (에러 해결)
+        wav_tensor = self.decode_audio_compiled(audio_codes)
         
-        print(f"  - (After Clone) Stride: {audio_codes.stride()}")
-        # ---------------------------------------------------------------------
-
-        try:
-            # ★ 컴파일된 함수 호출
-            wav_tensor = self.decode_audio_compiled(audio_codes)
-            
-            wav_cpu = wav_tensor.to("cpu", non_blocking=True).float().numpy()
-            return wav_cpu
-            
-        except RuntimeError as e:
-            print(f"\n[CRITICAL ERROR] Compile Execution Failed!")
-            print(f"Input Tensor Info causing crash: Shape={audio_codes.shape}, Stride={audio_codes.stride()}")
-            raise e
+        wav_cpu = wav_tensor.to("cpu", non_blocking=True).float().numpy()
+        return wav_cpu
 
 # =============================================================================
 # 3. 엔진 클래스 (Asyncio + Executor)
@@ -323,7 +302,18 @@ class Qwen3OmniFullDuplexEngine:
                 past_key_values=None
             )
             self.thinker_kv_cache = out.past_key_values
-            #compile
+            #compile / 나중에 안하는 decode_audio 부분 삭제
+            last_hidden = out.hidden_states[-1][:, -1:, :].detach().clone()
+            
+            log("info", "   ... Compiling Talker Inner Loop (Wait a moment)")
+            _, _ = self.logic.talker_step(
+                thinker_hidden=last_hidden,
+                past_key_values=None,
+                input_ids=self.last_talker_token
+            )
+
+            # 3. Decoder Warmup (컴파일은 안 하지만 캐시 로딩 등 위해 실행)
+            log("info", "   ... Initializing Audio Decoder")
             dummy_codes = torch.zeros((1, 16, 1), dtype=torch.long, device=self.logic.code2wav_device)
             self.logic.decode_audio(dummy_codes)
             
