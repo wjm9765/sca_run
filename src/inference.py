@@ -300,7 +300,7 @@ class Qwen3OmniFullDuplexEngine:
         while self.is_running:
             try:
                 audio_features = await self.input_queue.get()
-                log("info", "[Thinker] Start Processing Audio Chunk...")
+                # log("info", "[Thinker] Processing...")
 
                 # --- [Step 1] Listening (오디오 인코딩) ---
                 def listen_and_predict_first():
@@ -314,11 +314,14 @@ class Qwen3OmniFullDuplexEngine:
 
                 curr_token, self.thinker_kv_cache = await loop.run_in_executor(None, listen_and_predict_first)
                 
-                if curr_token.item() == self.cfg.silence_token_id:
-                    log("info", "[Thinker] Detected Silence.")
+                tok_id = curr_token.item()
+                if tok_id == self.cfg.silence_token_id:
+                    # log("info", "[Thinker] Silence.")
                     continue
-
-                log("info", f"[Thinker] First token predicted: {curr_token.item()}")
+                
+                # 예측된 토큰 출력 (간결화)
+                decoded_text = self.tokenizer.decode([tok_id], skip_special_tokens=True)
+                log("info", f">> {decoded_text}")
 
                 # --- [Step 2] Streaming Loop (1개 만들자마자 전송) ---
                 # ★ 여기가 핵심: executor를 루프 안에서 돌려서, 1개 생성 후 즉시 큐에 넣음
@@ -345,8 +348,7 @@ class Qwen3OmniFullDuplexEngine:
                         hidden_chunk = hidden_chunk.contiguous()
                     await self.hidden_queue.put(hidden_chunk)
                     
-                    if i == 0:
-                        log("info", "[Thinker] First hidden chunk sent to Talker.")
+                    # 배포용 최적화: 중간 전송 로그 제거
 
             except Exception as e:
                 log("error", f"Thinker Error: {e}")
