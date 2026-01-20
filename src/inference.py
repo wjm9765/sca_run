@@ -21,9 +21,9 @@ torch.set_num_threads(1)
 @dataclass
 class EngineConfig:
     # ★ [오디오 고정 길이 설정] 0.32초 = 4토큰 (Qwen3-Omni 구조적 특성)
-    audio_input_tokens: int = 4   
-    text_output_tokens: int = 2   
-    audio_output_tokens: int = 4  
+    audio_input_tokens: int = 8   
+    text_output_tokens: int = 4   
+    audio_output_tokens: int = 8
     silence_token_id: int = 151646 
     audio_token_id: int = 151675
 

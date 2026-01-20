@@ -65,9 +65,10 @@ async def sender_loop(engine, chunks, processor, model, device):
     log("info", "[Sender] Streaming audio chunks...")
     
     for i, chunk in enumerate(chunks):
-        if len(chunk) < 5120: # 16000 * 0.32
-            chunk = np.pad(chunk, (0, 5120 - len(chunk)))
-        
+        target_len = int(16000 * 0.64) # 10240
+        if len(chunk) < target_len:
+            chunk = np.pad(chunk, (0, target_len - len(chunk)))
+            
         features = processor.feature_extractor(
             [chunk], return_tensors="pt", sampling_rate=16000,padding=False,
         )
@@ -83,7 +84,7 @@ async def sender_loop(engine, chunks, processor, model, device):
         # 비동기 투입
         await engine.push_audio(input_features)
         
-        await asyncio.sleep(0.32) 
+        await asyncio.sleep(0.64) 
         
         if i % 10 == 0:
             log("info", f"Sent chunk {i}/{len(chunks)}")
@@ -118,7 +119,7 @@ async def main_async():
         log("info", f"✂️ Cutting audio to first {MAX_DURATION_SEC} seconds ({max_samples} samples)")
         full_audio = full_audio[:max_samples]
     
-    chunk_size = int(sr * 0.32)
+    chunk_size = int(sr * 0.64)
     chunks = [full_audio[i:i + chunk_size] for i in range(0, len(full_audio), chunk_size)]
     log("info", f"Chunks to process: {len(chunks)} (approx {len(chunks)*0.32/60:.1f} mins)")
 
