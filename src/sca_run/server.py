@@ -111,6 +111,7 @@ async def ws_pcm16(websocket: WebSocket):
     output_queue = asyncio.Queue() # Items: TeamAudioReturn
     
     log("info", "Starting Full Duplex Tasks...")
+    log("info", f"[Status] Server is READY. Listening on WebSocket /ws/pcm16. (Chunk size: {session_cfg.audio.chunk_bytes} bytes)")
 
     # -------------------------------------------------------------------------
     # Task 1: Input Loop (Receive -> Chunk -> Queue)
@@ -143,7 +144,9 @@ async def ws_pcm16(websocket: WebSocket):
                     # Pack into AudioInput (features field holds raw waveform now)
                     audio_in = AudioInput(features=waveform, timestamp=0.0)
                     
-                    print(f"Error processing input audio: {e}")
+                    # Log message removed to prevent flooding terminal (e.g. print error in loop)
+                    # Instead queue it
+                    await input_queue.put(audio_in)
                         
         except WebSocketDisconnect:
             log("info", "WS Disconnected (Input Loop)")
