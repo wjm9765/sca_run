@@ -123,12 +123,17 @@ def infer_audio_input_once_result(
     return infer_team_wav(cfg, audio_in)
 
 
-def team_wav_to_audio_output(team_ret: TeamAudioReturn) -> AudioOutput:
+def team_wav_to_audio_output(team_ret: TeamAudioReturn, cfg: Optional[AppConfig] = None) -> AudioOutput:
     """Convert a TeamAudioReturn (wav float) to streamable PCM16LE bytes."""
     pcm_bytes = wav_float_to_pcm16le_bytes(team_ret.wav)
+    
+    # Qwen3-Omni Output Sample Rate is 24000 Hz by default
+    # Get from config if available, else default to 24000
+    out_sr = cfg.audio.output_sample_rate if cfg else 24000
+    
     return AudioOutput(
         audio_bytes=pcm_bytes,
-        sample_rate=int(team_ret.sample_rate),
+        sample_rate=out_sr,
         channels=int(team_ret.channels) if getattr(team_ret, "channels", None) else 1,
         audio_format="pcm16le",
         text_log=getattr(team_ret, "text_log", None),

@@ -62,22 +62,26 @@ def _load_qwen_model_and_tokenizer(cfg: AppConfig):
     log("info", "[Team Inference] 🔄 Qwen3-Omni 모델 로딩 중...")
     
     try:
-        from transformers import AutoModelForCausalLM, AutoTokenizer
+        from transformers import AutoTokenizer, Qwen3OmniMoeForConditionalGeneration
         
         # Use Config object instead of raw env vars
         model_id = cfg.qwen.model_id
         device_map = cfg.qwen.device_map
         torch_dtype = cfg.qwen.torch_dtype
-        
+        attn_impl = cfg.qwen.attn_implementation
+
         log("info", f"[Team Inference] Model ID: {model_id}")
         log("info", f"[Team Inference] Device Map: {device_map}")
+        if attn_impl:
+            log("info", f"[Team Inference] Attention Implementation: {attn_impl}")
         
-        # 모델 로드
-        _qwen_model = AutoModelForCausalLM.from_pretrained(
+        # 모델 로드 (Qwen3OmniMoeForConditionalGeneration 사용)
+        _qwen_model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
             model_id,
             device_map=device_map,
             torch_dtype=torch_dtype if torch_dtype != "auto" else None,
             trust_remote_code=True,
+            attn_implementation=attn_impl,
         )
         # 토크나이저 로드
         _qwen_tokenizer = AutoTokenizer.from_pretrained(

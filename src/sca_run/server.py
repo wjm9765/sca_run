@@ -209,13 +209,16 @@ async def ws_pcm16(websocket: WebSocket):
             while True:
                 team_ret = await output_queue.get()
                 
-                audio_out = team_wav_to_audio_output(team_ret)
+                audio_out = team_wav_to_audio_output(team_ret, cfg=CFG)
                 
                 # Send Metadata
+                # The model output sample rate is output_sample_rate
+                # The browser/client needs to know this to play it back correctly.
+                
                 await websocket.send_json({
                     "type": "talker_audio",
                     "audio_format": audio_out.audio_format,
-                    "audio_sample_rate": audio_out.sample_rate,
+                    "audio_sample_rate": audio_out.sample_rate, 
                     "channels": audio_out.channels,
                     "text_log": audio_out.text_log,
                 })

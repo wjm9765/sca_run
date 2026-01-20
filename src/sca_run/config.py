@@ -22,8 +22,11 @@ class AudioConfig:
     Team request: remove hardcoded "12.5Hz / 4 frames" and make it configurable.
     """
 
-    # Incoming PCM sample rate (Hz)
+    # Including PCM sample rate (Hz)
     sample_rate: int = 16000
+    
+    # [Added] Output sample rate for Qwen3-Omni (Hz)
+    output_sample_rate: int = 24000
 
     # Framing reference (Hz). 12.5Hz => 80ms per frame.
     frame_hz: float = 12.5
@@ -114,6 +117,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
 
     audio = AudioConfig(
         sample_rate=int(_env("SCA_SAMPLE_RATE", audio_t.get("sample_rate", 16000))),
+        output_sample_rate=int(_env("SCA_OUTPUT_SAMPLE_RATE", audio_t.get("output_sample_rate", 24000))),
         frame_hz=float(_env("SCA_FRAME_HZ", audio_t.get("frame_hz", 12.5))),
         frames_per_chunk=int(_env("SCA_FRAMES_PER_CHUNK", audio_t.get("frames_per_chunk", 4))),
         channels=int(_env("SCA_CHANNELS", audio_t.get("channels", 1))),

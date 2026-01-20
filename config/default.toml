@@ -18,3 +18,6 @@ backend = "team"
 #   SCA_TEAM_FACTORY=<factory_function>
 # The factory must return an object with:
 #   infer(features: torch.Tensor) -> (wav: np.ndarray|torch.Tensor, sample_rate: int)
+
+# Flash Attention 2 Setting (Optional)
+# attn_implementation = "flash_attention_2"
