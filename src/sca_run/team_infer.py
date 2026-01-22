@@ -51,22 +51,23 @@ def _download_and_apply_lora(model, tokenizer):
         log("info", f"[Team Inference] 📂 Found local adapter at {local_adapter_path}")
         adapter_path = local_adapter_path
     else:
-        # Fallback to S3 Download Logic
-        lora_url = "https://s3.riverfog7.com/models/sca/full-duplex/SCA_duplex_finetune.tar.gz?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=lhQBsIsthBRiz5aEKzdA%2F20260122%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260122T051026Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=2d2867dbf2ab9fb0d67d343b62ab7c19ad8658006f8bce6125c999754b24f99a"
+        # Fallback to Downloading Logic (Updated Link)
+        # Old S3 link replaced with new HF dataset link
+        lora_url = "https://huggingface.co/datasets/wjm9765/sca_full_duplex/resolve/main/finetune.tar?download=true"
         local_dir = Path("lora_adapter")
-        target_extract_path = local_dir / "SCA_duplex_finetune"
+        # The tarball structure might differ, so we'll inspect after extraction
+        target_extract_check = local_dir / "SCA_duplex_finetune" 
         
-        if not target_extract_path.exists():
-            log("info", f"[Team Inference] ⬇️ Downloading LoRA adapter from S3...")
+        if not target_extract_check.exists():
+            log("info", f"[Team Inference] ⬇️ Downloading LoRA adapter from HuggingFace...")
             local_dir.mkdir(parents=True, exist_ok=True)
             try:
-                tar_filename = "lora_adapter.tar.gz"
-                # Use standard urllib
+                tar_filename = "finetune.tar"
                 with urllib.request.urlopen(lora_url) as response, open(tar_filename, 'wb') as out_file:
                     shutil.copyfileobj(response, out_file)
                 
                 log("info", "[Team Inference] 📦 Extracting LoRA adapter...")
-                with tarfile.open(tar_filename, "r:gz") as tar:
+                with tarfile.open(tar_filename, "r") as tar:
                     tar.extractall(path=local_dir)
                 
                 if os.path.exists(tar_filename):
@@ -75,11 +76,12 @@ def _download_and_apply_lora(model, tokenizer):
                 log("error", f"[Team Inference] ❌ Error downloading/extracting LoRA: {e}")
                 return model, tokenizer
 
-        # Find Adapter Path in Downloaded Directory
+        # Find Adapter Path in Downloaded Directory (Robust Search)
         adapter_path = None
+        # We check specific known paths or fallback to scanning
         candidates = [
-            target_extract_path / "final_model",
-            target_extract_path,
+            local_dir / "SCA_duplex_finetune" / "final_model",
+            local_dir / "SCA_duplex_finetune",
             local_dir
         ]
         for c in candidates:
