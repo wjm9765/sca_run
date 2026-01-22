@@ -1,0 +1,16 @@
+{
+  "base_model_name_or_path": "DoeunJeong/qwen3_sca_comedy",
+  "peft_type": "LORA",
+  "task_type": "CAUSAL_LM",
+  "inference_mode": false,
+  "r": 64,
+  "lora_alpha": 64,
+  "lora_dropout": 0.05,
+  "bias": "none",
+  "use_dora": false,
+  "modules_to_save": [
+    "talker.code_predictor",
+    "speaker_projection"
+  ],
+  "target_modules": ".*(thinker|talker)\\.model\\.layers\\.\\d+\\.self_attn\\.(q|k|v|o)_proj$"
+}

@@ -43,66 +43,101 @@ except ImportError:
     log("warning", "[Warning] Could not find team's inference.py. Check src/inference.py path.")
 
 def _download_and_apply_lora(model, tokenizer):
-    """Downloads and applies LoRA adapter. Checks for special token 151646 without resizing."""
-    lora_url = "https://s3.riverfog7.com/models/sca/full-duplex/SCA_duplex_finetune.tar.gz?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=lhQBsIsthBRiz5aEKzdA%2F20260122%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260122T051026Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=2d2867dbf2ab9fb0d67d343b62ab7c19ad8658006f8bce6125c999754b24f99a"
-    local_dir = Path("lora_adapter")
+    """Checks for local LoRA adapter and applies it. Fallback to S3 download if local not found."""
+    # 1. Check Local Path First (SCA_finetune/final_consolidated)
+    local_adapter_path = Path("SCA_finetune/final_consolidated")
     
-    # 1. Download and Extract if not exists
-    # If the tarball contains "SCA_duplex_finetune", we verify that specific folder.
-    target_extract_path = local_dir / "SCA_duplex_finetune"
-    
-    if not target_extract_path.exists():
-        log("info", f"[Team Inference] ⬇️ Downloading LoRA adapter from S3...")
-        local_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            tar_filename = "lora_adapter.tar.gz"
-            with urllib.request.urlopen(lora_url) as response, open(tar_filename, 'wb') as out_file:
-                shutil.copyfileobj(response, out_file)
-            
-            log("info", "[Team Inference] 📦 Extracting LoRA adapter...")
-            with tarfile.open(tar_filename, "r:gz") as tar:
-                # Filter to avoid unsafe extractions if possible, but minimal implementation:
-                tar.extractall(path=local_dir)
-            
-            if os.path.exists(tar_filename):
-                os.remove(tar_filename)
-        except Exception as e:
-             log("error", f"[Team Inference] ❌ Error downloading/extracting LoRA: {e}")
-             return model, tokenizer
+    if local_adapter_path.exists() and (local_adapter_path / "adapter_config.json").exists():
+        log("info", f"[Team Inference] 📂 Found local adapter at {local_adapter_path}")
+        adapter_path = local_adapter_path
+    else:
+        # Fallback to S3 Download Logic
+        lora_url = "https://s3.riverfog7.com/models/sca/full-duplex/SCA_duplex_finetune.tar.gz?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=lhQBsIsthBRiz5aEKzdA%2F20260122%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260122T051026Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=2d2867dbf2ab9fb0d67d343b62ab7c19ad8658006f8bce6125c999754b24f99a"
+        local_dir = Path("lora_adapter")
+        target_extract_path = local_dir / "SCA_duplex_finetune"
+        
+        if not target_extract_path.exists():
+            log("info", f"[Team Inference] ⬇️ Downloading LoRA adapter from S3...")
+            local_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                tar_filename = "lora_adapter.tar.gz"
+                # Use standard urllib
+                with urllib.request.urlopen(lora_url) as response, open(tar_filename, 'wb') as out_file:
+                    shutil.copyfileobj(response, out_file)
+                
+                log("info", "[Team Inference] 📦 Extracting LoRA adapter...")
+                with tarfile.open(tar_filename, "r:gz") as tar:
+                    tar.extractall(path=local_dir)
+                
+                if os.path.exists(tar_filename):
+                    os.remove(tar_filename)
+            except Exception as e:
+                log("error", f"[Team Inference] ❌ Error downloading/extracting LoRA: {e}")
+                return model, tokenizer
 
-    # 2. Find Adapter Configuration (Robust Search)
-    adapter_path = None
-    # Prefer expected path: lora_adapter/SCA_duplex_finetune/final_model
-    candidates = [
-        target_extract_path / "final_model",
-        target_extract_path,
-        local_dir
-    ]
-    for c in candidates:
-        if (c / "adapter_config.json").exists():
-            adapter_path = c
-            break
-            
-    # Fallback: scan directory if not found in obvious places
-    if not adapter_path:
-        for root, dirs, files in os.walk(local_dir):
-            if "adapter_config.json" in files:
-                adapter_path = Path(root)
+        # Find Adapter Path in Downloaded Directory
+        adapter_path = None
+        candidates = [
+            target_extract_path / "final_model",
+            target_extract_path,
+            local_dir
+        ]
+        for c in candidates:
+            if (c / "adapter_config.json").exists():
+                adapter_path = c
                 break
+        
+        if not adapter_path:
+             # Deep Scan Fallback
+            for root, dirs, files in os.walk(local_dir):
+                if "adapter_config.json" in files:
+                    adapter_path = Path(root)
+                    break
 
     if not adapter_path:
-        log("error", f"[Team Inference] ❌ Could not find 'adapter_config.json' in {local_dir}. LoRA merge skipped.")
+        log("error", f"[Team Inference] ❌ Could not find 'adapter_config.json'. LoRA merge skipped.")
         return model, tokenizer
 
-    # 3. Special Token Verification (Strict Check, No Resize)
-    # Token 151646 must be within vocab size to avoid lookup errors.
+    # 3. Special Token Handling (Crucial for correct decoding)
+    # Even if the ID is in vocab range, we must tell the tokenizer it's a Special Token
+    # so that decode/encode works correctly (e.g., mapping 151646 <-> "<|silence|>")
     special_token_id = 151646
+    special_token_str = "<|silence|>"
     vocab_size = model.get_input_embeddings().weight.shape[0]
-    
+
+    # 3-1. Check Range
     if special_token_id >= vocab_size:
-        log("warning", f"[Team Inference] ⚠️ Special token {special_token_id} is OUT of model vocab range ({vocab_size}). This may cause errors.")
+        log("info", f"[Team Inference] ➕ Resizing vocab to include special token {special_token_id}...")
+        model.resize_token_embeddings(special_token_id + 1)
+    
+    # 3-2. Verify Tokenizer Mapping
+    # Check if the string maps to the expected ID
+    current_id = tokenizer.convert_tokens_to_ids(special_token_str)
+    
+    if current_id != special_token_id:
+        log("info", f"[Team Inference] 🛠 Registering special token '{special_token_str}'...")
+        
+        # Try adding it as a special token
+        # Note: If 151646 is an existing "unused" slot, simply adding it might assign a NEW ID at the end.
+        # But we will try to register it. For many tokenizers, if we can't force ID, we warn.
+        try:
+            from transformers import AddedToken
+            # Add as special token
+            tokenizer.add_special_tokens({"additional_special_tokens": [AddedToken(special_token_str, special=True)]})
+            
+            # Check what ID it got
+            new_id = tokenizer.convert_tokens_to_ids(special_token_str)
+            
+            if new_id != special_token_id:
+                log("warning", f"[Team Inference] ⚠️ Tokenizer ID Mismatch! '{special_token_str}' got ID {new_id}, but model expects {special_token_id}.")
+                log("warning", f"[Team Inference] ⚠️ This implies 151646 is occupied or the tokenizer assigned a new slot.")
+            else:
+                log("info", f"[Team Inference] ✅ Tokenizer updated: '{special_token_str}' == {new_id}")
+                
+        except Exception as e:
+            log("warning", f"[Team Inference] ⚠️ Failed to update tokenizer: {e}")
     else:
-        log("info", f"[Team Inference] ✅ Special token {special_token_id} is within vocab range ({vocab_size}).")
+        log("info", f"[Team Inference] ✅ Tokenizer already maps '{special_token_str}' to {special_token_id}.")
 
     # 4. Apply LoRA and Merge
     try:
@@ -115,6 +150,8 @@ def _download_and_apply_lora(model, tokenizer):
         log("error", "[Team Inference] ❌ PEFT library is not installed. Skipping LoRA merge.")
     except Exception as e:
         log("error", f"[Team Inference] ❌ Failed to merge LoRA: {e}")
+        # Continue with base model even if merge fails?
+        # Typically yes, to avoid crashing, but behavior will be degraded.
 
     return model, tokenizer
 
