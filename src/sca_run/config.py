@@ -71,7 +71,7 @@ class QwenConfig:
     backend: str = "team"  # expected value in this scaffold
 
     # Qwen3-Omni settings
-    model_id: str = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
+    model_id: str = "DoeunJeong/qwen3_sca_comedy"
     device_map: str = "cuda:0"
     torch_dtype: str = "bfloat16"
     
