@@ -56,9 +56,12 @@ def _download_and_apply_lora(model, tokenizer):
         lora_url = "https://huggingface.co/datasets/wjm9765/sca_full_duplex/resolve/main/finetune.tar?download=true"
         local_dir = Path("lora_adapter")
         # The tarball structure might differ, so we'll inspect after extraction
-        target_extract_check = local_dir / "SCA_duplex_finetune" 
+        target_extract_check = local_dir / "SCA_duplex_finetune"
         
-        if not target_extract_check.exists():
+        # [Modified] If local_adapter folder exists, use it and skip download
+        if local_dir.exists() and local_dir.is_dir():
+            log("info", f"[Team Inference] 📂 Found existing '{local_dir}' folder. Skipping download.")
+        elif not target_extract_check.exists():
             log("info", f"[Team Inference] ⬇️ Downloading LoRA adapter from HuggingFace...")
             local_dir.mkdir(parents=True, exist_ok=True)
             try:
