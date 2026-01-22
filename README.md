@@ -2,6 +2,9 @@
 
 This repository contains the runner code for the **Qwen3-Omni** model fine-tuned for **Full Duplex** interaction. It allows for real-time voice conversations where the model listens and speaks simultaneously, enabling a fluid conversational experience.
 
+
+<img width="820" height="736" alt="아키텍처 drawio" src="https://github.com/user-attachments/assets/9fd75536-4d20-4fc2-9c22-76012a85c05d" />
+
 ## Training & Data Preparation
 
 - **Data Preparation**: [sca_data_prep](https://github.com/riverfog7/sca_data_prep) - Refer to this repository for preparing the dataset.
