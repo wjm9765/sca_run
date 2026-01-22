@@ -28,6 +28,10 @@ import torch
 from utils.client_utils import log
 from .config import AppConfig
 from .io_types import AudioInput, TeamAudioReturn
+import tarfile
+import shutil
+import urllib.request
+from pathlib import Path
 
 # Import team member's code
 try:
@@ -38,7 +42,83 @@ except ImportError:
     TEAM_CODE_AVAILABLE = False
     log("warning", "[Warning] Could not find team's inference.py. Check src/inference.py path.")
 
+def _download_and_apply_lora(model, tokenizer):
+    """Downloads and applies LoRA adapter. Checks for special token 151646 without resizing."""
+    lora_url = "https://s3.riverfog7.com/models/sca/full-duplex/SCA_duplex_finetune.tar.gz?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=lhQBsIsthBRiz5aEKzdA%2F20260122%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260122T051026Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=2d2867dbf2ab9fb0d67d343b62ab7c19ad8658006f8bce6125c999754b24f99a"
+    local_dir = Path("lora_adapter")
+    
+    # 1. Download and Extract if not exists
+    # If the tarball contains "SCA_duplex_finetune", we verify that specific folder.
+    target_extract_path = local_dir / "SCA_duplex_finetune"
+    
+    if not target_extract_path.exists():
+        log("info", f"[Team Inference] ⬇️ Downloading LoRA adapter from S3...")
+        local_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            tar_filename = "lora_adapter.tar.gz"
+            with urllib.request.urlopen(lora_url) as response, open(tar_filename, 'wb') as out_file:
+                shutil.copyfileobj(response, out_file)
+            
+            log("info", "[Team Inference] 📦 Extracting LoRA adapter...")
+            with tarfile.open(tar_filename, "r:gz") as tar:
+                # Filter to avoid unsafe extractions if possible, but minimal implementation:
+                tar.extractall(path=local_dir)
+            
+            if os.path.exists(tar_filename):
+                os.remove(tar_filename)
+        except Exception as e:
+             log("error", f"[Team Inference] ❌ Error downloading/extracting LoRA: {e}")
+             return model, tokenizer
 
+    # 2. Find Adapter Configuration (Robust Search)
+    adapter_path = None
+    # Prefer expected path: lora_adapter/SCA_duplex_finetune/final_model
+    candidates = [
+        target_extract_path / "final_model",
+        target_extract_path,
+        local_dir
+    ]
+    for c in candidates:
+        if (c / "adapter_config.json").exists():
+            adapter_path = c
+            break
+            
+    # Fallback: scan directory if not found in obvious places
+    if not adapter_path:
+        for root, dirs, files in os.walk(local_dir):
+            if "adapter_config.json" in files:
+                adapter_path = Path(root)
+                break
+
+    if not adapter_path:
+        log("error", f"[Team Inference] ❌ Could not find 'adapter_config.json' in {local_dir}. LoRA merge skipped.")
+        return model, tokenizer
+
+    # 3. Special Token Verification (Strict Check, No Resize)
+    # Token 151646 must be within vocab size to avoid lookup errors.
+    special_token_id = 151646
+    vocab_size = model.get_input_embeddings().weight.shape[0]
+    
+    if special_token_id >= vocab_size:
+        log("warning", f"[Team Inference] ⚠️ Special token {special_token_id} is OUT of model vocab range ({vocab_size}). This may cause errors.")
+    else:
+        log("info", f"[Team Inference] ✅ Special token {special_token_id} is within vocab range ({vocab_size}).")
+
+    # 4. Apply LoRA and Merge
+    try:
+        from peft import PeftModel
+        log("info", f"[Team Inference] 🔗 Loading LoRA from {adapter_path} and merging...")
+        model = PeftModel.from_pretrained(model, str(adapter_path))
+        model = model.merge_and_unload()
+        log("info", "[Team Inference] ✅ LoRA merged successfully!")
+    except ImportError:
+        log("error", "[Team Inference] ❌ PEFT library is not installed. Skipping LoRA merge.")
+    except Exception as e:
+        log("error", f"[Team Inference] ❌ Failed to merge LoRA: {e}")
+
+    return model, tokenizer
+
+        
 def _env(key: str, default: str = "") -> str:
     v = os.getenv(key)
     return default if v is None else v
@@ -88,6 +168,9 @@ def _load_qwen_model_and_tokenizer(cfg: AppConfig):
             model_id,
             trust_remote_code=True
         )
+
+        # Apply LoRA if configured
+        _qwen_model, _qwen_tokenizer = _download_and_apply_lora(_qwen_model, _qwen_tokenizer)
 
         log("info", "[Team Inference] ✅ Model & Tokenizer loaded!")
         return _qwen_model, _qwen_tokenizer
