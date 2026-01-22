@@ -98,47 +98,6 @@ def _download_and_apply_lora(model, tokenizer):
         log("error", f"[Team Inference] ❌ Could not find 'adapter_config.json'. LoRA merge skipped.")
         return model, tokenizer
 
-    # 3. Special Token Handling (Crucial for correct decoding)
-    # Even if the ID is in vocab range, we must tell the tokenizer it's a Special Token
-    # so that decode/encode works correctly (e.g., mapping 151646 <-> "<|silence|>")
-    special_token_id = 151646
-    special_token_str = "<|silence|>"
-    vocab_size = model.get_input_embeddings().weight.shape[0]
-
-    # 3-1. Check Range
-    if special_token_id >= vocab_size:
-        log("info", f"[Team Inference] ➕ Resizing vocab to include special token {special_token_id}...")
-        model.resize_token_embeddings(special_token_id + 1)
-    
-    # 3-2. Verify Tokenizer Mapping
-    # Check if the string maps to the expected ID
-    current_id = tokenizer.convert_tokens_to_ids(special_token_str)
-    
-    if current_id != special_token_id:
-        log("info", f"[Team Inference] 🛠 Registering special token '{special_token_str}'...")
-        
-        # Try adding it as a special token
-        # Note: If 151646 is an existing "unused" slot, simply adding it might assign a NEW ID at the end.
-        # But we will try to register it. For many tokenizers, if we can't force ID, we warn.
-        try:
-            from transformers import AddedToken
-            # Add as special token
-            tokenizer.add_special_tokens({"additional_special_tokens": [AddedToken(special_token_str, special=True)]})
-            
-            # Check what ID it got
-            new_id = tokenizer.convert_tokens_to_ids(special_token_str)
-            
-            if new_id != special_token_id:
-                log("warning", f"[Team Inference] ⚠️ Tokenizer ID Mismatch! '{special_token_str}' got ID {new_id}, but model expects {special_token_id}.")
-                log("warning", f"[Team Inference] ⚠️ This implies 151646 is occupied or the tokenizer assigned a new slot.")
-            else:
-                log("info", f"[Team Inference] ✅ Tokenizer updated: '{special_token_str}' == {new_id}")
-                
-        except Exception as e:
-            log("warning", f"[Team Inference] ⚠️ Failed to update tokenizer: {e}")
-    else:
-        log("info", f"[Team Inference] ✅ Tokenizer already maps '{special_token_str}' to {special_token_id}.")
-
     # 4. Apply LoRA and Merge
     try:
         from peft import PeftModel
